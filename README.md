@@ -3,7 +3,7 @@
 Run `kbmouse.ahk` with [AutoHotkey v2](https://www.autohotkey.com/) on Windows.
 Press **Caps Lock** to toggle mouse mode. Caps Lock's normal function is disabled while the script runs.
 
-A click-through badge appears in the bottom-left corner of the primary screen, above the taskbar, while mouse mode is on. It shows the speed level and whether drag is held. Turning mouse mode off hides it. Movement polling stops when all movement keys are released, and quitting releases any active drag.
+A click-through badge appears in the bottom-left corner of the primary screen, above the taskbar, while mouse mode is on. It shows the speed level and whether drag is held. The badge hides while the cursor is over its area and reappears when the cursor moves away. Turning mouse mode off hides it. Movement polling stops when all movement keys are released, and quitting releases any active drag.
 
 ## Controls
 

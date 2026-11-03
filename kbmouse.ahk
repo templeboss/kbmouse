@@ -24,6 +24,8 @@ badge.MarginX := 14
 badge.MarginY := 10
 badge.SetFont("s11 Bold", "Segoe UI")
 badgeText := badge.AddText("c76E4AD w330", "MOUSE MODE  |  SPEED 3/5")
+badgeBounds := 0
+badgeVisible := false
 OnExit Cleanup
 
 CapsLock::ToggleMouseMode()
@@ -55,26 +57,51 @@ CapsLock::ToggleMouseMode()
 #HotIf
 
 ToggleMouseMode() {
-    global mouseMode, badge
+    global mouseMode, badge, badgeVisible
     mouseMode := !mouseMode
     StopMovement()
     if mouseMode {
         UpdateBadge()
+        SetTimer RefreshBadgeVisibility, 50
         if MovementKeyDown()
             StartMovement()
     } else {
+        SetTimer RefreshBadgeVisibility, 0
         ReleaseDrag()
         badge.Hide()
+        badgeVisible := false
     }
 }
 
 UpdateBadge() {
-    global badge, badgeText, speedLevel, dragging
+    global badge, badgeText, speedLevel, dragging, badgeBounds, badgeVisible
     badgeText.Text := "MOUSE MODE  |  SPEED " speedLevel "/5" (dragging ? "  |  DRAG" : "")
     MonitorGetWorkArea MonitorGetPrimary(), &left, &top, &right, &bottom
     badge.Show("Hide AutoSize")
     badge.GetPos(, , &width, &height)
-    badge.Show("NoActivate x" (left + 16) " y" (bottom - height - 16))
+    badge.Show("Hide x" (left + 16) " y" (bottom - height - 16))
+    badge.GetPos(&x, &y, &width, &height)
+    ; Keep the bounds even while hidden so moving away restores the badge.
+    badgeBounds := {x: x, y: y, width: width, height: height}
+    badgeVisible := false
+    RefreshBadgeVisibility()
+}
+
+RefreshBadgeVisibility() {
+    global mouseMode, badge, badgeBounds, badgeVisible
+    if !mouseMode || !IsObject(badgeBounds)
+        return
+    MouseGetPos &x, &y
+    overBadge := x >= badgeBounds.x && x < badgeBounds.x + badgeBounds.width
+        && y >= badgeBounds.y && y < badgeBounds.y + badgeBounds.height
+    shouldShow := !overBadge
+    if (shouldShow = badgeVisible)
+        return
+    if shouldShow
+        badge.Show("NoActivate")
+    else
+        badge.Hide()
+    badgeVisible := shouldShow
 }
 
 ChangeSpeed(delta) {
@@ -182,6 +209,7 @@ MovePointer() {
 }
 
 Cleanup(*) {
+    SetTimer RefreshBadgeVisibility, 0
     StopMovement()
     ReleaseDrag()
 }
