@@ -8,7 +8,7 @@ CoordMode "Mouse", "Screen"
 
 mouseMode := false
 speedLevel := 3
-speeds := [800, 1600, 2400, 3000, 4000]
+speeds := [1800, 2400, 3000, 4000, 5200]
 ; Positions within the cursor's current monitor, 10% in from each edge.
 jumpPositions := [[0.10, 0.10], [0.90, 0.10], [0.10, 0.90], [0.90, 0.90]]
 moving := false
@@ -28,10 +28,17 @@ scrollSentH := 0
 ; Click-through, always on top, and does not take keyboard focus.
 badge := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x08000020", "Keyboard mouse")
 badge.BackColor := "17212B"
-badge.MarginX := 14
-badge.MarginY := 10
-badge.SetFont("s11 Bold", "Segoe UI")
-badgeText := badge.AddText("c76E4AD w330", "MOUSE MODE  |  SPEED 3/5")
+badge.MarginX := 8
+badge.MarginY := 4
+; Mouse glyph; turns amber while dragging.
+badge.SetFont("s10", "Segoe Fluent Icons")
+badgeIcon := badge.AddText("c76E4AD", Chr(0xE962))
+; Current speed level.
+badge.SetFont("s10 Bold", "Segoe UI")
+badgeText := badge.AddText("x+5 yp-2 c76E4AD", "3")
+WinSetTransparent 190, badge.Hwnd
+; Windows 11 rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = round).
+DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", badge.Hwnd, "UInt", 33, "Int*", 2, "UInt", 4)
 badgeBounds := 0
 badgeVisible := false
 OnExit Cleanup
@@ -50,6 +57,8 @@ CapsLock::ToggleMouseMode()
 *SC003::JumpToPosition(2)
 *SC004::JumpToPosition(3)
 *SC005::JumpToPosition(4)
+; Physical ` key: cycle to the center of the next monitor.
+*SC029::JumpToNextMonitor()
 *SC027::Click "Left"
 *n::Click "Right"
 *,::Click "Middle"
@@ -83,8 +92,9 @@ ToggleMouseMode() {
 }
 
 UpdateBadge() {
-    global badge, badgeText, speedLevel, dragging, badgeBounds, badgeVisible
-    badgeText.Text := "MOUSE MODE  |  SPEED " speedLevel "/5" (dragging ? "  |  DRAG" : "")
+    global badge, badgeIcon, badgeText, speedLevel, dragging, badgeBounds, badgeVisible
+    badgeIcon.SetFont(dragging ? "cF2A33A" : "c76E4AD")
+    badgeText.Text := speedLevel
     MonitorGetWorkArea MonitorGetPrimary(), &left, &top, &right, &bottom
     badge.Show("Hide AutoSize")
     badge.GetPos(, , &width, &height)
@@ -124,6 +134,8 @@ ToggleDrag() {
     dragging := !dragging
     SendEvent dragging ? "{LButton Down}" : "{LButton Up}"
     UpdateBadge()
+    ; One toggle per press; autorepeat would flip the button while M is held.
+    KeyWait "m"
 }
 
 ReleaseDrag() {
@@ -140,27 +152,39 @@ MovementKeyDown() {
 }
 
 JumpToPosition(index) {
-    global jumpPositions, fractionX, fractionY, lastTick
+    global jumpPositions
+    JumpWithinMonitor(CursorMonitor(), jumpPositions[index])
+    ; One jump per press, even if the key is held.
+    KeyWait Format("SC{:03X}", index + 1)
+}
+
+JumpToNextMonitor() {
+    JumpWithinMonitor(Mod(CursorMonitor(), MonitorGetCount()) + 1, [0.5, 0.5])
+    KeyWait "SC029"
+}
+
+; Monitor that contains the cursor (falls back to the primary).
+CursorMonitor() {
     MouseGetPos &cursorX, &cursorY
-    monitor := MonitorGetPrimary()
     Loop MonitorGetCount() {
         ; Full monitor bounds include the taskbar; targets use the work area.
         MonitorGet A_Index, &left, &top, &right, &bottom
-        if (cursorX >= left && cursorX < right && cursorY >= top && cursorY < bottom) {
-            monitor := A_Index
-            break
-        }
+        if (cursorX >= left && cursorX < right && cursorY >= top && cursorY < bottom)
+            return A_Index
     }
+    return MonitorGetPrimary()
+}
+
+; Moves to [x, y] fractions of a monitor's work area.
+JumpWithinMonitor(monitor, position) {
+    global fractionX, fractionY, lastTick
     MonitorGetWorkArea monitor, &left, &top, &right, &bottom
-    position := jumpPositions[index]
     x := left + Round((right - left - 1) * position[1])
     y := top + Round((bottom - top - 1) * position[2])
     fractionX := 0.0
     fractionY := 0.0
     lastTick := A_TickCount
     MouseMove x, y, 0
-    ; One jump per press, even if the key is held.
-    KeyWait Format("SC{:03X}", index + 1)
 }
 
 StartMovement() {
