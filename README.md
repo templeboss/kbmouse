@@ -27,6 +27,8 @@ These bindings apply in mouse mode; Caps Lock and Ctrl+Alt+Q work in either mode
 
 Hold movement keys for continuous movement; combine directions for diagonals.
 Speed levels are **800, 1600, 2400 (default), 3000, 4000 px/s** and reset on restart.
+Holding a scroll key scrolls smoothly and continuously (tune `scrollSpeed`); a tap scrolls one notch. Space slows scrolling too. Ctrl + U / O sends whole notches, so it zooms like Ctrl + wheel.
+
 Space slows movement only while held. Keys 1–4 jump once per press on whichever monitor currently contains the cursor, landing 10% in from the edges of its usable area, excluding the taskbar. Customize the four `[x, y]` fractions in `jumpPositions` near the top of the script (`0.0` is left/top, `0.5` center, `1.0` right/bottom). These number keys type normally outside mouse mode.
 
 ## Troubleshooting
