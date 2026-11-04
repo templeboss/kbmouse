@@ -3,7 +3,7 @@
 Run `kbmouse.ahk` with [AutoHotkey v2](https://www.autohotkey.com/) on Windows.
 Press **Caps Lock** to toggle mouse mode. Caps Lock's normal function is disabled while the script runs.
 
-A click-through badge appears in the bottom-left corner of the primary screen, above the taskbar, while mouse mode is on. It shows a mouse icon and the speed level (1–5); the icon turns amber while drag is held. The badge hides while the cursor is over its area and reappears when the cursor moves away. Turning mouse mode off hides it. Movement polling stops when all movement keys are released, and quitting releases any active drag.
+A click-through badge appears in the bottom-left corner of the monitor the cursor is on (it follows the cursor across monitors), above the taskbar, while mouse mode is on. It shows a mouse icon and the speed level (1–5); the icon turns amber while drag is held. The badge hides while the cursor is over its area and reappears when the cursor moves away. Turning mouse mode off hides it. Movement polling stops when all movement keys are released, and quitting releases any active drag.
 
 ## Controls
 
@@ -13,6 +13,8 @@ These bindings apply in mouse mode; Caps Lock and Ctrl+Alt+Q work in either mode
 | --- | --- |
 | I / J / K / L | Move up / left / down / right |
 | Space + movement | Precision movement (20% speed) |
+| (startup) | Script relaunches itself elevated (UAC prompt on each start) |
+| Shift + movement / scroll | Speed boost (1.5× movement, 2× scroll) |
 | 1 / 2 / 3 / 4 | Jump near top-left / top-right / bottom-left / bottom-right corners of the cursor's current monitor (top number row) |
 | ` | Jump to the center of the next monitor (cycles) |
 | ; | Left click (physical US semicolon key, `SC027`) |

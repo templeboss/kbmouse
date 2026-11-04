@@ -1,6 +1,12 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
+; Relaunch elevated so it works over admin windows (installers, games, elevated tray menus).
+if !A_IsAdmin {
+    try Run '*RunAs "' A_AhkPath '" "' A_ScriptFullPath '"'
+    ExitApp
+}
+
 ; Caps Lock toggles the mouse layer.
 ; Ctrl+Alt+Q exits the script entirely.
 SetCapsLockState "AlwaysOff"
@@ -41,9 +47,12 @@ WinSetTransparent 190, badge.Hwnd
 DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", badge.Hwnd, "UInt", 33, "Int*", 2, "UInt", 4)
 badgeBounds := 0
 badgeVisible := false
+badgeMonitor := 0
 OnExit Cleanup
 
 CapsLock::ToggleMouseMode()
+; Escape hatch: Shift+CapsLock turns mouse mode off and toggles the real Caps Lock.
++CapsLock::RealCapsLock()
 ^!q::ExitApp()
 
 #HotIf mouseMode
@@ -73,6 +82,14 @@ CapsLock::ToggleMouseMode()
 *.::ChangeSpeed(-1)
 #HotIf
 
+RealCapsLock() {
+    global mouseMode
+    if mouseMode
+        ToggleMouseMode()
+    ; Real Caps Lock on → back to the forced-off state; off → turn it on.
+    SetCapsLockState GetKeyState("CapsLock", "T") ? "AlwaysOff" : "On"
+}
+
 ToggleMouseMode() {
     global mouseMode, badge, badgeVisible
     mouseMode := !mouseMode
@@ -92,10 +109,12 @@ ToggleMouseMode() {
 }
 
 UpdateBadge() {
-    global badge, badgeIcon, badgeText, speedLevel, dragging, badgeBounds, badgeVisible
+    global badge, badgeIcon, badgeText, speedLevel, dragging, badgeBounds, badgeVisible, badgeMonitor
     badgeIcon.SetFont(dragging ? "cF2A33A" : "c76E4AD")
     badgeText.Text := speedLevel
-    MonitorGetWorkArea MonitorGetPrimary(), &left, &top, &right, &bottom
+    ; Badge follows the monitor the cursor is on.
+    badgeMonitor := CursorMonitor()
+    MonitorGetWorkArea badgeMonitor, &left, &top, &right, &bottom
     badge.Show("Hide AutoSize")
     badge.GetPos(, , &width, &height)
     badge.Show("Hide x" (left + 16) " y" (bottom - height - 16))
@@ -107,9 +126,13 @@ UpdateBadge() {
 }
 
 RefreshBadgeVisibility() {
-    global mouseMode, badge, badgeBounds, badgeVisible
+    global mouseMode, badge, badgeBounds, badgeVisible, badgeMonitor
     if !mouseMode || !IsObject(badgeBounds)
         return
+    if (CursorMonitor() != badgeMonitor) {
+        UpdateBadge()
+        return
+    }
     MouseGetPos &x, &y
     overBadge := x >= badgeBounds.x && x < badgeBounds.x + badgeBounds.width
         && y >= badgeBounds.y && y < badgeBounds.y + badgeBounds.height
@@ -224,6 +247,7 @@ MovePointer() {
     }
 
     velocity := speeds[speedLevel] * (GetKeyState("Space", "P") ? 0.20 : 1.0)
+        * (GetKeyState("Shift", "P") ? 1.5 : 1.0)
 
     ; Normalize diagonals so they aren't faster.
     if (dx != 0 && dy != 0) {
@@ -270,10 +294,14 @@ ScrollStep() {
         StopScroll()
         return
     }
+    ; Apps treat Shift+wheel as horizontal scroll, so keep Shift logically up.
+    if GetKeyState("Shift")
+        SendEvent "{Blind}{Shift up}"
     now := A_TickCount
     dt := Min(0.05, (now - scrollTick) / 1000.0)
     scrollTick := now
     velocity := scrollSpeed * (GetKeyState("Space", "P") ? 0.25 : 1.0)
+        * (GetKeyState("Shift", "P") ? 2.0 : 1.0)
     scrollFractionV += v * velocity * dt
     scrollFractionH += h * velocity * dt
     scrollSentV += SendWheel(0x0800, &scrollFractionV)
@@ -286,6 +314,9 @@ StopScroll() {
         return
     SetTimer ScrollStep, 0
     scrolling := false
+    ; Restore Shift if it is still physically held.
+    if GetKeyState("Shift", "P") && !GetKeyState("Shift")
+        SendEvent "{Blind}{Shift down}"
     ; A quick tap still scrolls one full notch.
     if (Abs(scrollSentV) > 0 && Abs(scrollSentV) < 120)
         WheelEvent(0x0800, (scrollSentV > 0 ? 120 : -120) - scrollSentV)
@@ -309,6 +340,8 @@ WheelEvent(flag, delta) {
 }
 
 Cleanup(*) {
+    ; Hand Caps Lock control back to Windows when the script exits.
+    SetCapsLockState "Off"
     SetTimer RefreshBadgeVisibility, 0
     StopMovement()
     StopScroll()
