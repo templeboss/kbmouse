@@ -76,10 +76,13 @@ CapsLock::ToggleMouseMode()
 *o::StartScroll("{WheelDown}")
 *h::StartScroll("{WheelLeft}")
 *y::StartScroll("{WheelRight}")
-*b::SendEvent "{Browser_Forward}"
-*v::SendEvent "{Browser_Back}"
 *p::ChangeSpeed(1)
 *.::ChangeSpeed(-1)
+#HotIf
+; v = Back, b = Forward, except with Ctrl held so Ctrl+V / Ctrl+(Shift+)B work normally.
+#HotIf mouseMode && !GetKeyState("Ctrl", "P")
+*b::SendEvent "{Browser_Forward}"
+*v::SendEvent "{Browser_Back}"
 #HotIf
 
 RealCapsLock() {
