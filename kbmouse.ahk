@@ -11,6 +11,12 @@ if !A_IsAdmin {
 ; Ctrl+Alt+Q exits the script entirely.
 SetCapsLockState "AlwaysOff"
 CoordMode "Mouse", "Screen"
+; Latency: no built-in sleeps after mouse/key events (default 10 ms each),
+; 1 ms timer resolution (default ~15.6 ms ticks), and high priority.
+SetMouseDelay -1
+SetKeyDelay -1
+DllCall("winmm\timeBeginPeriod", "UInt", 1)
+ProcessSetPriority "High"
 
 mouseMode := false
 speedLevel := 3
@@ -50,6 +56,8 @@ badgeVisible := false
 badgeMonitor := 0
 OnExit Cleanup
 
+; Right Shift acts as Left Shift.
+RShift::LShift
 CapsLock::ToggleMouseMode()
 ; Escape hatch: Shift+CapsLock toggles the real Caps Lock, leaving mouse mode as is.
 +CapsLock::RealCapsLock()
@@ -343,6 +351,7 @@ WheelEvent(flag, delta) {
 Cleanup(*) {
     ; Hand Caps Lock control back to Windows when the script exits.
     SetCapsLockState "Off"
+    DllCall("winmm\timeEndPeriod", "UInt", 1)
     SetTimer RefreshBadgeVisibility, 0
     StopMovement()
     StopScroll()
