@@ -51,7 +51,7 @@ badgeMonitor := 0
 OnExit Cleanup
 
 CapsLock::ToggleMouseMode()
-; Escape hatch: Shift+CapsLock turns mouse mode off and toggles the real Caps Lock.
+; Escape hatch: Shift+CapsLock toggles the real Caps Lock, leaving mouse mode as is.
 +CapsLock::RealCapsLock()
 ^!q::ExitApp()
 
@@ -86,9 +86,7 @@ CapsLock::ToggleMouseMode()
 #HotIf
 
 RealCapsLock() {
-    global mouseMode
-    if mouseMode
-        ToggleMouseMode()
+    ; Mouse mode state is left untouched.
     ; Real Caps Lock on → back to the forced-off state; off → turn it on.
     SetCapsLockState GetKeyState("CapsLock", "T") ? "AlwaysOff" : "On"
 }
@@ -250,7 +248,7 @@ MovePointer() {
     }
 
     velocity := speeds[speedLevel] * (GetKeyState("Space", "P") ? 0.20 : 1.0)
-        * (GetKeyState("Shift", "P") ? 1.5 : 1.0)
+        * (GetKeyState("Shift", "P") ? 3.0 : 1.0)
 
     ; Normalize diagonals so they aren't faster.
     if (dx != 0 && dy != 0) {
@@ -304,7 +302,7 @@ ScrollStep() {
     dt := Min(0.05, (now - scrollTick) / 1000.0)
     scrollTick := now
     velocity := scrollSpeed * (GetKeyState("Space", "P") ? 0.25 : 1.0)
-        * (GetKeyState("Shift", "P") ? 2.0 : 1.0)
+        * (GetKeyState("Shift", "P") ? 3.0 : 1.0)
     scrollFractionV += v * velocity * dt
     scrollFractionH += h * velocity * dt
     scrollSentV += SendWheel(0x0800, &scrollFractionV)
