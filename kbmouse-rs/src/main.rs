@@ -6,13 +6,14 @@
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering::Relaxed};
+use std::sync::OnceLock;
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::HiDpi::*;
@@ -26,8 +27,8 @@ const SCROLL_SPEED: f64 = 1200.0; // wheel units/s (120 = one notch)
 const SHIFT_BOOST: f64 = 3.0;
 const SPACE_SLOW_MOVE: f64 = 0.20;
 const SPACE_SLOW_SCROLL: f64 = 0.25;
-const TICK_ACTIVE: Duration = Duration::from_millis(2);
-const TICK_IDLE: Duration = Duration::from_millis(5);
+/// Worker tick while moving or scrolling; it sleeps until woken otherwise.
+const TICK: Duration = Duration::from_millis(2);
 
 // ---- virtual keys ----
 const LSHIFT: usize = 0xA0;
@@ -77,6 +78,7 @@ static SCROLLING: AtomicBool = AtomicBool::new(false);
 static SHIFT_HIDDEN: AtomicBool = AtomicBool::new(false);
 static SPEED_LEVEL: AtomicUsize = AtomicUsize::new(3);
 static BADGE: AtomicIsize = AtomicIsize::new(0);
+static WORKER: OnceLock<Thread> = OnceLock::new();
 static BADGE_MONITOR: AtomicIsize = AtomicIsize::new(0);
 static BADGE_VISIBLE: AtomicBool = AtomicBool::new(false);
 static BADGE_RECT: [std::sync::atomic::AtomicI32; 4] = [const { std::sync::atomic::AtomicI32::new(0) }; 4];
@@ -92,6 +94,13 @@ fn ctrl_phys() -> bool {
 }
 fn alt_phys() -> bool {
     held(LALT) || held(RALT)
+}
+
+/// Wakes the worker; it parks whenever nothing is moving or scrolling.
+fn wake() {
+    if let Some(t) = WORKER.get() {
+        t.unpark();
+    }
 }
 
 // ---- input synthesis ----
@@ -225,8 +234,7 @@ fn post(msg: u32) {
     }
 }
 
-fn toggle_mode() {
-    let on = !MODE.load(Relaxed);
+fn set_mode(on: bool) {
     MODE.store(on, Relaxed);
     for s in &SCROLL {
         s.store(false, Relaxed);
@@ -236,6 +244,11 @@ fn toggle_mode() {
         release_drag();
     }
     post(WM_MODE);
+    wake();
+}
+
+fn toggle_mode() {
+    set_mode(!MODE.load(Relaxed));
 }
 
 fn toggle_drag() {
@@ -262,8 +275,16 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     if code >= 0 {
         let k = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         // Skip events we (or other tools) injected.
-        if k.flags.0 & 0x10 == 0 && handle_key(k) {
-            return LRESULT(1);
+        if k.flags.0 & 0x10 == 0 {
+            let swallow = handle_key(k);
+            // Any press or release can start, stop or retarget motion
+            // (opposite keys, Ctrl, Space, Shift), so let the worker re-check.
+            if MODE.load(Relaxed) {
+                wake();
+            }
+            if swallow {
+                return LRESULT(1);
+            }
         }
     }
     CallNextHookEx(None, code, wparam, lparam)
@@ -535,8 +556,11 @@ fn worker() {
         sent_h: 0,
     };
     loop {
-        let active = w.tick();
-        std::thread::sleep(if active { TICK_ACTIVE } else { TICK_IDLE });
+        if w.tick() {
+            std::thread::sleep(TICK);
+        } else {
+            std::thread::park();
+        }
     }
 }
 
@@ -690,7 +714,6 @@ fn main() {
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        timeBeginPeriod(1);
         let _ = SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
         // Real Caps Lock starts off; Caps is swallowed from here on.
@@ -701,7 +724,8 @@ fn main() {
         let hwnd = create_badge();
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(hinst), 0).unwrap();
-        std::thread::spawn(worker);
+        let t = std::thread::spawn(worker);
+        let _ = WORKER.set(t.thread().clone());
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -712,6 +736,5 @@ fn main() {
         release_drag();
         let _ = UnhookWindowsHookEx(hook);
         let _ = DestroyWindow(hwnd);
-        timeEndPeriod(1);
     }
 }
