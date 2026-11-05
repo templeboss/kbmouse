@@ -6,7 +6,7 @@
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering::Relaxed};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
@@ -41,12 +41,12 @@ enum Action {
     ClickLeft, ClickRight, ClickMiddle, Drag,
     ScrollUp, ScrollDown, ScrollLeft, ScrollRight,
     SpeedUp, SpeedDown, Back, Forward, Home, End,
-    Corner1, Corner2, Corner3, Corner4, NextMonitor,
+    Corner1, Corner2, Corner3, Corner4, NextMonitor, Grid,
 }
 use Action::*;
 
 /// (config name, action, default key). Keys are physical positions (US layout).
-const BINDINGS: [(&str, Action, &str); 24] = [
+const BINDINGS: [(&str, Action, &str); 25] = [
     ("up", Up, "I"), ("down", Down, "K"), ("left", Left, "J"), ("right", Right, "L"),
     ("slow", Slow, "space"),
     ("click_left", ClickLeft, "semicolon"), ("click_right", ClickRight, "N"),
@@ -58,7 +58,7 @@ const BINDINGS: [(&str, Action, &str); 24] = [
     ("home", Home, "7"), ("end", End, "9"),
     ("corner1", Corner1, "1"), ("corner2", Corner2, "2"),
     ("corner3", Corner3, "3"), ("corner4", Corner4, "4"),
-    ("next_monitor", NextMonitor, "backtick"),
+    ("next_monitor", NextMonitor, "backtick"), ("grid", Grid, "G"),
 ];
 
 const DEFAULT_SPEEDS: &str = "1800, 2400, 3000, 4000, 5200";
@@ -70,6 +70,7 @@ struct Config {
     shift_boost: f64,
     slow_move: f64,
     slow_scroll: f64,
+    grid_rows: usize,
     jumps: [[f64; 2]; 4],
     /// Scan code bound to each action (indexed by `Action as usize`).
     key_of: [usize; BINDINGS.len()],
@@ -136,6 +137,7 @@ fn default_config_text() -> String {
     t += "shift_boost = 3.0     # Shift multiplies movement and scroll\n";
     t += "slow_move = 0.20      # slow key multiplier for movement\n";
     t += "slow_scroll = 0.25    # slow key multiplier for scrolling\n\n";
+    t += "# Grid mode: 4 columns; 3 rows = Q-V keys, 4 rows adds 1-4 on top.\ngrid_rows = 3\n\n";
     t += "# Corner jump positions as x, y fractions of the work area (0 = left/top, 1 = right/bottom).\n";
     for (i, j) in DEFAULT_JUMPS.iter().enumerate() {
         t += &format!("jump{} = {j}\n", i + 1);
@@ -177,7 +179,7 @@ fn load_config(warns: &mut Vec<String>) -> Config {
         }
     }
     let known = |k: &str| {
-        matches!(k, "speeds" | "scroll_speed" | "shift_boost" | "slow_move" | "slow_scroll")
+        matches!(k, "speeds" | "scroll_speed" | "shift_boost" | "slow_move" | "slow_scroll" | "grid_rows")
             || (k.len() == 5 && k.starts_with("jump") && matches!(k.as_bytes()[4], b'1'..=b'4'))
             || BINDINGS.iter().any(|b| b.0 == k)
     };
@@ -203,6 +205,14 @@ fn load_config(warns: &mut Vec<String>) -> Config {
     let shift_boost = num("shift_boost", 3.0, warns);
     let slow_move = num("slow_move", 0.20, warns);
     let slow_scroll = num("slow_scroll", 0.25, warns);
+
+    let mut grid_rows = 3;
+    if let Some((n, v)) = map.get("grid_rows") {
+        match v.parse::<usize>() {
+            Ok(r @ (3 | 4)) => grid_rows = r,
+            _ => warns.push(format!("line {n}: grid_rows must be 3 or 4")),
+        }
+    }
 
     let mut speeds = parse_nums(DEFAULT_SPEEDS).unwrap();
     if let Some((n, v)) = map.get("speeds") {
@@ -241,7 +251,7 @@ fn load_config(warns: &mut Vec<String>) -> Config {
             action_at[sc] = Some(action);
         }
     }
-    Config { speeds, scroll_speed, shift_boost, slow_move, slow_scroll, jumps, key_of, action_at }
+    Config { speeds, scroll_speed, shift_boost, slow_move, slow_scroll, grid_rows, jumps, key_of, action_at }
 }
 
 // ---- persisted state (speed level) ----
@@ -276,6 +286,7 @@ fn warn_box(msg: &str) {
 const WM_REFRESH: u32 = WM_APP + 1;
 const WM_MODE: u32 = WM_APP + 2;
 const WM_SAVE_SOON: u32 = WM_APP + 3;
+const WM_GRID: u32 = WM_APP + 4;
 const TIMER_BADGE: usize = 1;
 const TIMER_SAVE: usize = 2;
 
@@ -453,6 +464,219 @@ fn jump_next_monitor() {
     jump_within(all[(i + 1) % all.len()], [0.5, 0.5]);
 }
 
+// ---- grid mode ----
+// A key opens a grid over the cursor's monitor. Each key press narrows to that
+// cell and moves the cursor to its center. Enter/Esc/Caps close it; a click
+// key closes it and clicks; Backspace steps back.
+const GRID_COLS: i32 = 4;
+/// Key presses after which the grid closes on its own.
+const GRID_DEPTH: usize = 4;
+/// Scan codes per grid row: 1234 / QWER / ASDF / ZXCV. `grid_rows` 3 uses the last three.
+const GRID_KEYS: [[usize; 4]; 4] = [
+    [0x02, 0x03, 0x04, 0x05],
+    [0x10, 0x11, 0x12, 0x13],
+    [0x1E, 0x1F, 0x20, 0x21],
+    [0x2C, 0x2D, 0x2E, 0x2F],
+];
+const GRID_LABELS: [&[u8; 4]; 4] = [b"1234", b"QWER", b"ASDF", b"ZXCV"];
+static GRID: AtomicBool = AtomicBool::new(false);
+static GRID_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Regions [left, top, right, bottom] in screen pixels; first = the monitor.
+static GRID_STACK: Mutex<Vec<[i32; 4]>> = Mutex::new(Vec::new());
+
+fn open_grid() {
+    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    unsafe {
+        let _ = GetMonitorInfoW(cursor_monitor(), &mut mi);
+    }
+    let r = mi.rcMonitor;
+    *GRID_STACK.lock().unwrap() = vec![[r.left, r.top, r.right, r.bottom]];
+    GRID.store(true, Relaxed);
+    post(WM_GRID);
+}
+
+fn close_grid() {
+    if GRID.swap(false, Relaxed) {
+        GRID_STACK.lock().unwrap().clear();
+        post(WM_GRID);
+    }
+}
+
+fn grid_land(r: [i32; 4]) {
+    move_to((r[0] + r[2] - 1) / 2, (r[1] + r[3] - 1) / 2);
+}
+
+fn grid_press(sc: usize) {
+    let rows = cfg().grid_rows;
+    let off = 4 - rows;
+    let Some((row, col)) =
+        (0..rows).find_map(|r| GRID_KEYS[off + r].iter().position(|k| *k == sc).map(|c| (r as i32, c as i32)))
+    else {
+        close_grid(); // any other key leaves the grid, like G
+        return;
+    };
+    let mut st = GRID_STACK.lock().unwrap();
+    let Some(cur) = st.last().copied() else {
+        return;
+    };
+    let (w, h) = (cur[2] - cur[0], cur[3] - cur[1]);
+    if w < GRID_COLS * 2 || h < rows as i32 * 2 {
+        return; // already pixel-sized
+    }
+    let cell = |i: i32, n: i32, len: i32| (len as f64 * i as f64 / n as f64).round() as i32;
+    let n = rows as i32;
+    let next = [
+        cur[0] + cell(col, GRID_COLS, w),
+        cur[1] + cell(row, n, h),
+        cur[0] + cell(col + 1, GRID_COLS, w),
+        cur[1] + cell(row + 1, n, h),
+    ];
+    st.push(next);
+    let done = st.len() > GRID_DEPTH; // root + GRID_DEPTH presses
+    drop(st);
+    grid_land(next);
+    if done {
+        close_grid();
+    } else {
+        post(WM_GRID);
+    }
+}
+
+fn grid_back() {
+    let mut st = GRID_STACK.lock().unwrap();
+    if st.len() > 1 {
+        st.pop();
+        let r = *st.last().unwrap();
+        drop(st);
+        grid_land(r);
+        post(WM_GRID);
+    } else {
+        drop(st);
+        close_grid();
+    }
+}
+
+fn update_grid() {
+    let h = HWND(GRID_HWND.load(Relaxed) as *mut _);
+    unsafe {
+        if GRID.load(Relaxed) {
+            let Some(o) = GRID_STACK.lock().unwrap().first().copied() else {
+                return;
+            };
+            let _ = SetWindowPos(
+                h, Some(HWND_TOPMOST), o[0], o[1], o[2] - o[0], o[3] - o[1],
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = InvalidateRect(Some(h), None, false);
+        } else {
+            let _ = ShowWindow(h, SW_HIDE);
+        }
+    }
+}
+
+const GRID_KEY_COLOR: COLORREF = COLORREF(0x030201); // transparent via color key
+
+fn paint_grid(hwnd: HWND) {
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        let dc = BeginPaint(hwnd, &mut ps);
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let keyb = CreateSolidBrush(GRID_KEY_COLOR);
+        FillRect(dc, &rc, keyb);
+        let _ = DeleteObject(keyb.into());
+
+        let (o, c) = {
+            let st = GRID_STACK.lock().unwrap();
+            match (st.first(), st.last()) {
+                (Some(o), Some(c)) => (*o, *c),
+                _ => {
+                    let _ = EndPaint(hwnd, &ps);
+                    return;
+                }
+            }
+        };
+        let r = [c[0] - o[0], c[1] - o[1], c[2] - o[0], c[3] - o[1]];
+        let rows = cfg().grid_rows as i32;
+        let off = 4 - rows as usize;
+        let (w, h) = (r[2] - r[0], r[3] - r[1]);
+
+        let pen = CreatePen(PS_SOLID, px(2), rgb(0xF2, 0xA3, 0x3A));
+        let old_pen = SelectObject(dc, pen.into());
+        let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        let _ = Rectangle(dc, r[0], r[1], r[2], r[3]);
+        for i in 1..GRID_COLS {
+            let x = r[0] + w * i / GRID_COLS;
+            let _ = MoveToEx(dc, x, r[1], None);
+            let _ = LineTo(dc, x, r[3]);
+        }
+        for j in 1..rows {
+            let y = r[1] + h * j / rows;
+            let _ = MoveToEx(dc, r[0], y, None);
+            let _ = LineTo(dc, r[2], y);
+        }
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        let _ = DeleteObject(pen.into());
+
+        // Key labels, skipped once cells get too small to hold them.
+        let (cw, ch) = (w / GRID_COLS, h / rows);
+        if cw >= px(16) && ch >= px(16) {
+            let font = CreateFontW(
+                -px(14), 0, 0, 0, 700, 0, 0, 0,
+                FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
+                FONT_QUALITY(5), 0, w!("Segoe UI"),
+            );
+            let old_font = SelectObject(dc, font.into());
+            let bg = CreateSolidBrush(rgb(0x17, 0x21, 0x2B));
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, rgb(0x76, 0xE4, 0xAD));
+            let (pw, ph) = (cw.min(px(26)) - 2, ch.min(px(22)) - 2);
+            for row in 0..rows {
+                for col in 0..GRID_COLS {
+                    let cx = r[0] + w * (2 * col + 1) / (2 * GRID_COLS);
+                    let cy = r[1] + h * (2 * row + 1) / (2 * rows);
+                    let mut pill = RECT { left: cx - pw / 2, top: cy - ph / 2, right: cx + pw / 2, bottom: cy + ph / 2 };
+                    FillRect(dc, &pill, bg);
+                    let ch = GRID_LABELS[off + row as usize][col as usize] as u16;
+                    DrawTextW(dc, &mut [ch], &mut pill, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+            }
+            SelectObject(dc, old_font);
+            let _ = DeleteObject(bg.into());
+            let _ = DeleteObject(font.into());
+        }
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+unsafe extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_grid(hwnd);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn create_grid() {
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+        let class = w!("kbmouse_grid");
+        let wc = WNDCLASSW { lpfnWndProc: Some(grid_proc), hInstance: hinst, lpszClassName: class, ..Default::default() };
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            class, w!("Keyboard mouse grid"), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst), None,
+        )
+        .unwrap();
+        let _ = SetLayeredWindowAttributes(hwnd, GRID_KEY_COLOR, 230, LWA_COLORKEY | LWA_ALPHA);
+        GRID_HWND.store(hwnd.0 as isize, Relaxed);
+    }
+}
+
 // ---- mode / drag / speed ----
 fn post(msg: u32) {
     let h = BADGE.load(Relaxed);
@@ -471,6 +695,7 @@ fn set_mode(on: bool) {
     RESET.store(true, Relaxed);
     if !on {
         release_drag();
+        close_grid();
     }
     post(WM_MODE);
     wake();
@@ -601,6 +826,42 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     if !MODE.load(Relaxed) {
         return false;
     }
+
+    // Grid open: keys drive the grid; modifiers pass through.
+    if GRID.load(Relaxed) {
+        if matches!(vk, 0xA0..=0xA5 | 0x10..=0x12 | 0x5B | 0x5C) {
+            return false;
+        }
+        if !repeat {
+            match (vk, act) {
+                (0x0D | 0x1B, _) => close_grid(),
+                (_, Some(Grid)) => open_grid(), // restart: full grid on the cursor's monitor
+                (0x08, _) => grid_back(),
+                (_, Some(ClickLeft)) => {
+                    close_grid();
+                    click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+                }
+                (_, Some(ClickRight)) => {
+                    close_grid();
+                    click(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
+                }
+                (_, Some(ClickMiddle)) => {
+                    close_grid();
+                    click(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP);
+                }
+                _ => {
+                    if k.flags.0 & 1 == 0 {
+                        grid_press(sc);
+                    } else {
+                        close_grid();
+                    }
+                }
+            }
+        }
+        SWALLOWED[vk].store(true, Relaxed);
+        return true;
+    }
+
     let Some(act) = act else {
         return false;
     };
@@ -639,6 +900,11 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
                 jump_next_monitor();
             }
         }
+        Grid => {
+            if !repeat {
+                open_grid();
+            }
+        }
     }
     SWALLOWED[vk].store(true, Relaxed);
     true
@@ -674,8 +940,6 @@ struct Worker {
     scroll_last: Instant,
     sfv: f64,
     sfh: f64,
-    sent_v: i32,
-    sent_h: i32,
 }
 
 impl Worker {
@@ -688,13 +952,6 @@ impl Worker {
         // Give Shift back to the app if it is still physically held.
         if SHIFT_HIDDEN.swap(false, Relaxed) && shift_phys() {
             lshift(false);
-        }
-        // A quick tap still scrolls one full notch.
-        if self.sent_v != 0 && self.sent_v.abs() < 120 {
-            wheel(false, if self.sent_v > 0 { 120 } else { -120 } - self.sent_v);
-        }
-        if self.sent_h != 0 && self.sent_h.abs() < 120 {
-            wheel(true, if self.sent_h > 0 { 120 } else { -120 } - self.sent_h);
         }
     }
 
@@ -720,8 +977,9 @@ impl Worker {
         let mut active = false;
 
         // Cursor movement.
-        let dx = held_action(Right) as i32 - held_action(Left) as i32;
-        let dy = held_action(Down) as i32 - held_action(Up) as i32;
+        let grid = GRID.load(Relaxed);
+        let dx = if grid { 0 } else { held_action(Right) as i32 - held_action(Left) as i32 };
+        let dy = if grid { 0 } else { held_action(Down) as i32 - held_action(Up) as i32 };
         if dx != 0 || dy != 0 {
             active = true;
             if !self.moving {
@@ -759,8 +1017,6 @@ impl Worker {
                 self.scroll_last = now;
                 self.sfv = 0.0;
                 self.sfh = 0.0;
-                self.sent_v = 0;
-                self.sent_h = 0;
                 SCROLLING.store(true, Relaxed);
                 // Apps treat Shift+wheel as horizontal; hide Shift while scrolling.
                 if shift_phys() {
@@ -776,13 +1032,11 @@ impl Worker {
             let dv = self.sfv.round();
             if dv != 0.0 {
                 self.sfv -= dv;
-                self.sent_v += dv as i32;
                 wheel(false, dv as i32);
             }
             let dh = self.sfh.round();
             if dh != 0.0 {
                 self.sfh -= dh;
-                self.sent_h += dh as i32;
                 wheel(true, dh as i32);
             }
         } else {
@@ -806,8 +1060,6 @@ fn worker() {
         scroll_last: now,
         sfv: 0.0,
         sfh: 0.0,
-        sent_v: 0,
-        sent_h: 0,
     };
     loop {
         if w.tick() {
@@ -964,6 +1216,10 @@ unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             LRESULT(0)
         }
+        WM_GRID => {
+            update_grid();
+            LRESULT(0)
+        }
         WM_SAVE_SOON => {
             // Debounce: write the state file once the speed stops changing.
             SetTimer(Some(hwnd), TIMER_SAVE, 500, None);
@@ -1031,6 +1287,7 @@ fn main() {
         }
 
         let hwnd = create_badge();
+        create_grid();
         let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(hinst), 0).unwrap();
@@ -1044,6 +1301,7 @@ fn main() {
         }
 
         release_drag();
+        close_grid();
         save_state();
         let _ = UnhookWindowsHookEx(hook);
         let _ = WTSUnRegisterSessionNotification(hwnd);

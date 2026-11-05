@@ -30,9 +30,13 @@ These bindings apply in mouse mode; Caps Lock and Ctrl+Alt+Q work in either mode
 
 Hold movement keys for continuous movement; combine directions for diagonals.
 Speed levels are **1800, 2400, 3000 (default), 4000, 5200 px/s** and reset on restart.
-Holding a scroll key scrolls smoothly and continuously (tune `scrollSpeed`); a tap scrolls one notch. Space slows scrolling too. Ctrl + U / O sends whole notches, so it zooms like Ctrl + wheel.
+Holding a scroll key scrolls smoothly and continuously (tune `scrollSpeed`); a tap scrolls in proportion to how long the key is held. Space slows scrolling too. Ctrl + U / O sends whole notches, so it zooms like Ctrl + wheel.
 
 Space slows movement only while held. Keys 1–4 jump once per press on whichever monitor currently contains the cursor, landing 10% in from the edges of its usable area, excluding the taskbar. Customize the four `[x, y]` fractions in `jumpPositions` near the top of the script (`0.0` is left/top, `0.5` center, `1.0` right/bottom). `` ` `` moves the cursor to the center of the next monitor, cycling through all of them. These number keys and `` ` `` type normally outside mouse mode.
+
+## Rust version: grid mode
+
+**G** opens a 4×3 grid over the cursor's monitor, labelled like the keys (`Q W E R / A S D F / Z X C V`; `grid_rows = 4` adds `1 2 3 4` on top). Each key narrows to that cell and moves the cursor to its center; after the 4th press the grid closes on its own. **Backspace** steps back; **Enter / Esc** close it, **G** restarts with the full grid (Caps closes it and leaves mouse mode); a **click key** (`;` `N` `,`) closes it and clicks. Any other key closes it (swallowed, like G).
 
 ## Rust version: config and state
 
