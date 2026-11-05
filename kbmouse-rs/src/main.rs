@@ -143,6 +143,11 @@ fn tap_vk(vk: u16) {
     send(&[key_input(vk, 0, KEYBD_EVENT_FLAGS(0)), key_input(vk, 0, KEYEVENTF_KEYUP)]);
 }
 
+/// Extended-key tap (Home, End, ...), so apps don't see the numpad variant.
+fn tap_ext(vk: u16) {
+    send(&[key_input(vk, 0, KEYEVENTF_EXTENDEDKEY), key_input(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP)]);
+}
+
 fn wheel(horizontal: bool, delta: i32) {
     let f = if horizontal { MOUSEEVENTF_HWHEEL } else { MOUSEEVENTF_WHEEL };
     send(&[mouse_input(f, 0, 0, delta)]);
@@ -390,6 +395,9 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
                     jump_corner(sc as usize - 2);
                 }
             }
+            // Physical 7 / 9: Home / End (auto-repeats; Shift and Ctrl still apply).
+            0x08 => tap_ext(VK_HOME.0),
+            0x0A => tap_ext(VK_END.0),
             // Physical ` : center of the next monitor.
             0x29 => {
                 if !repeat {
