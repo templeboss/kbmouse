@@ -15,6 +15,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::RemoteDesktop::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -249,6 +250,19 @@ fn set_mode(on: bool) {
 
 fn toggle_mode() {
     set_mode(!MODE.load(Relaxed));
+}
+
+/// Session locked or unlocked: key-ups on the secure desktop never reach the
+/// hook, so drop mouse mode, the drag button and all tracked key state.
+fn release_all() {
+    if held(RSHIFT) {
+        lshift(true);
+    }
+    for i in 0..256 {
+        HELD[i].store(false, Relaxed);
+        SWALLOWED[i].store(false, Relaxed);
+    }
+    set_mode(false);
 }
 
 fn toggle_drag() {
@@ -682,6 +696,12 @@ unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             refresh_visibility(hwnd);
             LRESULT(0)
         }
+        WM_WTSSESSION_CHANGE => {
+            if matches!(wparam.0 as u32, WTS_SESSION_LOCK | WTS_SESSION_UNLOCK) {
+                release_all();
+            }
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -722,6 +742,7 @@ fn main() {
         }
 
         let hwnd = create_badge();
+        let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(hinst), 0).unwrap();
         let t = std::thread::spawn(worker);
@@ -735,6 +756,7 @@ fn main() {
 
         release_drag();
         let _ = UnhookWindowsHookEx(hook);
+        let _ = WTSUnRegisterSessionNotification(hwnd);
         let _ = DestroyWindow(hwnd);
     }
 }
