@@ -34,6 +34,12 @@ Holding a scroll key scrolls smoothly and continuously (tune `scrollSpeed`); a t
 
 Space slows movement only while held. Keys 1–4 jump once per press on whichever monitor currently contains the cursor, landing 10% in from the edges of its usable area, excluding the taskbar. Customize the four `[x, y]` fractions in `jumpPositions` near the top of the script (`0.0` is left/top, `0.5` center, `1.0` right/bottom). `` ` `` moves the cursor to the center of the next monitor, cycling through all of them. These number keys and `` ` `` type normally outside mouse mode.
 
+## Rust version: config and state
+
+The Rust version (`kbmouse-rs`) reads `%APPDATA%\kbmouse\kbmouse.ini`, created with defaults on first run. It sets speed levels, scroll speed, Shift boost, slow multipliers, corner jump positions and every mouse-mode key binding (keys are physical US positions, e.g. `click_left = semicolon`). Restart to apply changes. Bad values fall back to defaults and a warning box lists them at startup. Caps Lock, Shift, Ctrl and Ctrl+Alt+Q are fixed.
+
+The current speed level is saved to `%APPDATA%\kbmouse\state.ini` and restored on start.
+
 ## Troubleshooting
 
 - Keys type letters: press Caps Lock to enable mouse mode.

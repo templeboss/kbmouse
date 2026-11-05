@@ -21,17 +21,10 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-// ---- tuning (same values as kbmouse.ahk) ----
-const SPEEDS: [f64; 5] = [1800.0, 2400.0, 3000.0, 4000.0, 5200.0];
-const JUMPS: [[f64; 2]; 4] = [[0.10, 0.10], [0.90, 0.10], [0.10, 0.90], [0.90, 0.90]];
-const SCROLL_SPEED: f64 = 1200.0; // wheel units/s (120 = one notch)
-const SHIFT_BOOST: f64 = 3.0;
-const SPACE_SLOW_MOVE: f64 = 0.20;
-const SPACE_SLOW_SCROLL: f64 = 0.25;
 /// Worker tick while moving or scrolling; it sleeps until woken otherwise.
 const TICK: Duration = Duration::from_millis(2);
 
-// ---- virtual keys ----
+// ---- virtual keys (fixed, not remappable) ----
 const LSHIFT: usize = 0xA0;
 const RSHIFT: usize = 0xA1;
 const LCTRL: usize = 0xA2;
@@ -39,27 +32,252 @@ const RCTRL: usize = 0xA3;
 const LALT: usize = 0xA4;
 const RALT: usize = 0xA5;
 const CAPS: usize = 0x14;
-const SPACE: usize = 0x20;
-const KEY_I: usize = 0x49;
-const KEY_J: usize = 0x4A;
-const KEY_K: usize = 0x4B;
-const KEY_L: usize = 0x4C;
-const KEY_U: usize = 0x55;
-const KEY_O: usize = 0x4F;
-const KEY_H: usize = 0x48;
-const KEY_Y: usize = 0x59;
-const KEY_N: usize = 0x4E;
-const KEY_M: usize = 0x4D;
-const KEY_P: usize = 0x50;
-const KEY_B: usize = 0x42;
-const KEY_V: usize = 0x56;
 const KEY_Q: usize = 0x51;
-const COMMA: usize = 0xBC;
-const PERIOD: usize = 0xBE;
+
+// ---- config ----
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    Up, Down, Left, Right, Slow,
+    ClickLeft, ClickRight, ClickMiddle, Drag,
+    ScrollUp, ScrollDown, ScrollLeft, ScrollRight,
+    SpeedUp, SpeedDown, Back, Forward, Home, End,
+    Corner1, Corner2, Corner3, Corner4, NextMonitor,
+}
+use Action::*;
+
+/// (config name, action, default key). Keys are physical positions (US layout).
+const BINDINGS: [(&str, Action, &str); 24] = [
+    ("up", Up, "I"), ("down", Down, "K"), ("left", Left, "J"), ("right", Right, "L"),
+    ("slow", Slow, "space"),
+    ("click_left", ClickLeft, "semicolon"), ("click_right", ClickRight, "N"),
+    ("click_middle", ClickMiddle, "comma"), ("drag", Drag, "M"),
+    ("scroll_up", ScrollUp, "U"), ("scroll_down", ScrollDown, "O"),
+    ("scroll_left", ScrollLeft, "H"), ("scroll_right", ScrollRight, "Y"),
+    ("speed_up", SpeedUp, "P"), ("speed_down", SpeedDown, "period"),
+    ("back", Back, "V"), ("forward", Forward, "B"),
+    ("home", Home, "7"), ("end", End, "9"),
+    ("corner1", Corner1, "1"), ("corner2", Corner2, "2"),
+    ("corner3", Corner3, "3"), ("corner4", Corner4, "4"),
+    ("next_monitor", NextMonitor, "backtick"),
+];
+
+const DEFAULT_SPEEDS: &str = "1800, 2400, 3000, 4000, 5200";
+const DEFAULT_JUMPS: [&str; 4] = ["0.10, 0.10", "0.90, 0.10", "0.10, 0.90", "0.90, 0.90"];
+
+struct Config {
+    speeds: Vec<f64>,
+    scroll_speed: f64, // wheel units/s (120 = one notch)
+    shift_boost: f64,
+    slow_move: f64,
+    slow_scroll: f64,
+    jumps: [[f64; 2]; 4],
+    /// Scan code bound to each action (indexed by `Action as usize`).
+    key_of: [usize; BINDINGS.len()],
+    /// Action bound to each scan code.
+    action_at: [Option<Action>; 256],
+}
+
+static CFG: OnceLock<Config> = OnceLock::new();
+fn cfg() -> &'static Config {
+    CFG.get().expect("config loaded before hooks")
+}
+
+/// Physical key position -> set-1 scan code (US layout names).
+fn key_sc(name: &str) -> Option<usize> {
+    let n = name.trim().to_ascii_lowercase();
+    if let [c] = n.as_bytes() {
+        for (row, base) in [(&b"qwertyuiop"[..], 0x10), (b"asdfghjkl", 0x1E), (b"zxcvbnm", 0x2C)] {
+            if let Some(i) = row.iter().position(|r| r == c) {
+                return Some(base + i);
+            }
+        }
+        match c {
+            b'1'..=b'9' => return Some(0x02 + (c - b'1') as usize),
+            b'0' => return Some(0x0B),
+            _ => {}
+        }
+    }
+    Some(match n.as_str() {
+        "space" => 0x39,
+        "semicolon" | ";" => 0x27,
+        "comma" | "," => 0x33,
+        "period" | "." => 0x34,
+        "slash" | "/" => 0x35,
+        "backtick" | "`" => 0x29,
+        "minus" | "-" => 0x0C,
+        "equals" | "=" => 0x0D,
+        "lbracket" | "[" => 0x1A,
+        "rbracket" | "]" => 0x1B,
+        "quote" | "'" => 0x28,
+        "backslash" | "\\" => 0x2B,
+        _ => return None,
+    })
+}
+
+fn parse_nums(v: &str) -> Option<Vec<f64>> {
+    v.split(',').map(|p| p.trim().parse::<f64>().ok().filter(|x| x.is_finite())).collect()
+}
+
+fn appdata_dir() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("kbmouse"))
+}
+
+fn default_config_text() -> String {
+    let mut t = String::from(
+        "# kbmouse config. One `name = value` per line; # starts a comment.\n\
+         # Delete or break a line to get its default (a warning shows at startup).\n\
+         # Keys are physical positions (US layout): A-Z, 0-9, space, semicolon, comma,\n\
+         # period, slash, backtick, minus, equals, lbracket, rbracket, quote, backslash.\n\
+         # Caps Lock, Shift, Ctrl and Ctrl+Alt+Q are fixed.\n\n\
+         # Speed levels in px/s (1-9 values); the badge shows the level.\n",
+    );
+    t += &format!("speeds = {DEFAULT_SPEEDS}\n");
+    t += "scroll_speed = 1200   # wheel units/s, 120 = one notch\n";
+    t += "shift_boost = 3.0     # Shift multiplies movement and scroll\n";
+    t += "slow_move = 0.20      # slow key multiplier for movement\n";
+    t += "slow_scroll = 0.25    # slow key multiplier for scrolling\n\n";
+    t += "# Corner jump positions as x, y fractions of the work area (0 = left/top, 1 = right/bottom).\n";
+    for (i, j) in DEFAULT_JUMPS.iter().enumerate() {
+        t += &format!("jump{} = {j}\n", i + 1);
+    }
+    t += "\n# Key bindings.\n";
+    for (name, _, key) in BINDINGS {
+        t += &format!("{name} = {key}\n");
+    }
+    t
+}
+
+/// Reads `kbmouse.ini` (creating it with defaults if missing). Bad values fall
+/// back to defaults and are collected in `warns`.
+fn load_config(warns: &mut Vec<String>) -> Config {
+    let dir = appdata_dir();
+    let path = dir.as_ref().map(|d| d.join("kbmouse.ini"));
+    let mut text = String::new();
+    if let Some(p) = &path {
+        match std::fs::read_to_string(p) {
+            Ok(t) => text = t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = std::fs::create_dir_all(dir.as_ref().unwrap());
+                let _ = std::fs::write(p, default_config_text());
+            }
+            Err(e) => warns.push(format!("cannot read {}: {e}", p.display())),
+        }
+    }
+    let mut map = std::collections::HashMap::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+        match line.split_once('=') {
+            Some((k, v)) => {
+                map.insert(k.trim().to_ascii_lowercase(), (n + 1, v.trim().to_string()));
+            }
+            None => warns.push(format!("line {}: expected name = value", n + 1)),
+        }
+    }
+    let known = |k: &str| {
+        matches!(k, "speeds" | "scroll_speed" | "shift_boost" | "slow_move" | "slow_scroll")
+            || (k.len() == 5 && k.starts_with("jump") && matches!(k.as_bytes()[4], b'1'..=b'4'))
+            || BINDINGS.iter().any(|b| b.0 == k)
+    };
+    for (k, (n, _)) in &map {
+        if !known(k) {
+            warns.push(format!("line {n}: unknown setting '{k}'"));
+        }
+    }
+
+    let num = |name: &str, default: f64, warns: &mut Vec<String>| -> f64 {
+        match map.get(name) {
+            None => default,
+            Some((n, v)) => match v.parse::<f64>() {
+                Ok(x) if x.is_finite() && x > 0.0 => x,
+                _ => {
+                    warns.push(format!("line {n}: {name} must be a positive number"));
+                    default
+                }
+            },
+        }
+    };
+    let scroll_speed = num("scroll_speed", 1200.0, warns);
+    let shift_boost = num("shift_boost", 3.0, warns);
+    let slow_move = num("slow_move", 0.20, warns);
+    let slow_scroll = num("slow_scroll", 0.25, warns);
+
+    let mut speeds = parse_nums(DEFAULT_SPEEDS).unwrap();
+    if let Some((n, v)) = map.get("speeds") {
+        match parse_nums(v) {
+            Some(s) if (1..=9).contains(&s.len()) && s.iter().all(|x| *x > 0.0) => speeds = s,
+            _ => warns.push(format!("line {n}: speeds needs 1-9 positive numbers")),
+        }
+    }
+
+    let mut jumps = [[0.0; 2]; 4];
+    for i in 0..4 {
+        let d = parse_nums(DEFAULT_JUMPS[i]).unwrap();
+        jumps[i] = [d[0], d[1]];
+        if let Some((n, v)) = map.get(&format!("jump{}", i + 1)) {
+            match parse_nums(v) {
+                Some(p) if p.len() == 2 && p.iter().all(|x| (0.0..=1.0).contains(x)) => jumps[i] = [p[0], p[1]],
+                _ => warns.push(format!("line {n}: jump{} needs two numbers between 0 and 1", i + 1)),
+            }
+        }
+    }
+
+    let mut key_of = [0usize; BINDINGS.len()];
+    let mut action_at = [None; 256];
+    for (name, action, default) in BINDINGS {
+        let mut sc = key_sc(default).unwrap();
+        if let Some((n, v)) = map.get(name) {
+            match key_sc(v) {
+                Some(s) => sc = s,
+                None => warns.push(format!("line {n}: unknown key '{v}' for {name}, using {default}")),
+            }
+        }
+        key_of[action as usize] = sc;
+        if action_at[sc].is_some() {
+            warns.push(format!("a key is bound twice; {name} is disabled"));
+        } else {
+            action_at[sc] = Some(action);
+        }
+    }
+    Config { speeds, scroll_speed, shift_boost, slow_move, slow_scroll, jumps, key_of, action_at }
+}
+
+// ---- persisted state (speed level) ----
+fn state_path() -> Option<std::path::PathBuf> {
+    Some(appdata_dir()?.join("state.ini"))
+}
+
+fn load_state() -> usize {
+    let text = state_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let lvl = text
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .find(|(k, _)| k.trim() == "speed_level")
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok());
+    lvl.unwrap_or(3).clamp(1, cfg().speeds.len())
+}
+
+fn save_state() {
+    if let Some(p) = state_path() {
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        let _ = std::fs::write(p, format!("speed_level = {}\n", SPEED_LEVEL.load(Relaxed)));
+    }
+}
+
+fn warn_box(msg: &str) {
+    let text: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        MessageBoxW(None, PCWSTR(text.as_ptr()), w!("kbmouse config"), MB_OK | MB_ICONWARNING);
+    }
+}
 
 const WM_REFRESH: u32 = WM_APP + 1;
 const WM_MODE: u32 = WM_APP + 2;
+const WM_SAVE_SOON: u32 = WM_APP + 3;
 const TIMER_BADGE: usize = 1;
+const TIMER_SAVE: usize = 2;
 
 // ---- shared state ----
 const fn flags() -> [AtomicBool; 256] {
@@ -67,6 +285,8 @@ const fn flags() -> [AtomicBool; 256] {
 }
 /// Physical (non-injected) key state, tracked for every key.
 static HELD: [AtomicBool; 256] = flags();
+/// Same, by scan code (non-extended keys only); mouse-layer keys use this.
+static HELD_SC: [AtomicBool; 256] = flags();
 /// Keys whose down event we swallowed, so the matching up is swallowed too.
 static SWALLOWED: [AtomicBool; 256] = flags();
 /// Scroll keys armed in mouse mode: u, o, h, y.
@@ -86,6 +306,9 @@ static BADGE_RECT: [std::sync::atomic::AtomicI32; 4] = [const { std::sync::atomi
 
 fn held(vk: usize) -> bool {
     HELD[vk].load(Relaxed)
+}
+fn held_action(a: Action) -> bool {
+    HELD_SC[cfg().key_of[a as usize]].load(Relaxed)
 }
 fn shift_phys() -> bool {
     held(LSHIFT) || held(RSHIFT)
@@ -220,7 +443,7 @@ fn jump_within(m: HMONITOR, pos: [f64; 2]) {
 }
 
 fn jump_corner(index: usize) {
-    jump_within(cursor_monitor(), JUMPS[index]);
+    jump_within(cursor_monitor(), cfg().jumps[index]);
 }
 
 fn jump_next_monitor() {
@@ -265,6 +488,7 @@ fn release_all() {
     }
     for i in 0..256 {
         HELD[i].store(false, Relaxed);
+        HELD_SC[i].store(false, Relaxed);
         SWALLOWED[i].store(false, Relaxed);
     }
     set_mode(false);
@@ -284,9 +508,10 @@ fn release_drag() {
 }
 
 fn change_speed(delta: isize) {
-    let lvl = (SPEED_LEVEL.load(Relaxed) as isize + delta).clamp(1, SPEEDS.len() as isize);
+    let lvl = (SPEED_LEVEL.load(Relaxed) as isize + delta).clamp(1, cfg().speeds.len() as isize);
     SPEED_LEVEL.store(lvl as usize, Relaxed);
     post(WM_REFRESH);
+    post(WM_SAVE_SOON);
 }
 
 // ---- keyboard hook ----
@@ -317,13 +542,22 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     }
     let up = k.flags.0 & 0x80 != 0;
     let repeat = HELD[vk].swap(!up, Relaxed);
+    // Mouse-layer keys are bound by physical position (scan code); extended
+    // keys (arrows, right Ctrl, ...) share scan codes with others, so skip them.
+    let sc = k.scanCode as usize;
+    let act = if k.flags.0 & 1 == 0 && sc < 256 {
+        HELD_SC[sc].store(!up, Relaxed);
+        cfg().action_at[sc]
+    } else {
+        None
+    };
 
     if up {
-        match vk {
-            KEY_U => SCROLL[0].store(false, Relaxed),
-            KEY_O => SCROLL[1].store(false, Relaxed),
-            KEY_H => SCROLL[2].store(false, Relaxed),
-            KEY_Y => SCROLL[3].store(false, Relaxed),
+        match act {
+            Some(ScrollUp) => SCROLL[0].store(false, Relaxed),
+            Some(ScrollDown) => SCROLL[1].store(false, Relaxed),
+            Some(ScrollLeft) => SCROLL[2].store(false, Relaxed),
+            Some(ScrollRight) => SCROLL[3].store(false, Relaxed),
             _ => {}
         }
     }
@@ -367,67 +601,64 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     if !MODE.load(Relaxed) {
         return false;
     }
+    let Some(act) = act else {
+        return false;
+    };
 
-    match vk {
-        // Movement is driven by the worker from HELD; Space is the slow modifier.
-        KEY_I | KEY_J | KEY_K | KEY_L | SPACE => {}
-        KEY_N => click(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-        COMMA => click(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-        KEY_M => {
+    match act {
+        // Movement is driven by the worker from HELD_SC; Slow is a modifier.
+        Up | Down | Left | Right | Slow => {}
+        ClickRight => click(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        ClickMiddle => click(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        ClickLeft => click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        Drag => {
             if !repeat {
                 toggle_drag();
             }
         }
-        KEY_U | KEY_O | KEY_H | KEY_Y => scroll_key(vk),
-        KEY_P => change_speed(1),
-        PERIOD => change_speed(-1),
+        ScrollUp | ScrollDown | ScrollLeft | ScrollRight => scroll_key(act),
+        SpeedUp => change_speed(1),
+        SpeedDown => change_speed(-1),
         // Back/Forward, except with Ctrl so Ctrl+V / Ctrl+B pass through.
-        KEY_B | KEY_V => {
+        Back | Forward => {
             if ctrl_phys() {
                 return false;
             }
-            tap_vk(if vk == KEY_B { VK_BROWSER_FORWARD.0 } else { VK_BROWSER_BACK.0 });
+            tap_vk(if act == Forward { VK_BROWSER_FORWARD.0 } else { VK_BROWSER_BACK.0 });
         }
-        _ => match k.scanCode {
-            // Physical top-row 1-4: jump near monitor corners.
-            sc @ 0x02..=0x05 => {
-                if !repeat {
-                    jump_corner(sc as usize - 2);
-                }
+        // Home / End auto-repeat; Shift and Ctrl still apply.
+        Home => tap_ext(VK_HOME.0),
+        End => tap_ext(VK_END.0),
+        Corner1 | Corner2 | Corner3 | Corner4 => {
+            if !repeat {
+                jump_corner(act as usize - Corner1 as usize);
             }
-            // Physical 7 / 9: Home / End (auto-repeats; Shift and Ctrl still apply).
-            0x08 => tap_ext(VK_HOME.0),
-            0x0A => tap_ext(VK_END.0),
-            // Physical ` : center of the next monitor.
-            0x29 => {
-                if !repeat {
-                    jump_next_monitor();
-                }
+        }
+        NextMonitor => {
+            if !repeat {
+                jump_next_monitor();
             }
-            // Physical ; : left click.
-            0x27 => click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            _ => return false,
-        },
+        }
     }
     SWALLOWED[vk].store(true, Relaxed);
     true
 }
 
-fn scroll_key(vk: usize) {
+fn scroll_key(act: Action) {
     if ctrl_phys() {
         // One whole notch per press so Ctrl+wheel zooms in steps.
-        match vk {
-            KEY_U => wheel(false, 120),
-            KEY_O => wheel(false, -120),
-            KEY_Y => wheel(true, 120),
+        match act {
+            ScrollUp => wheel(false, 120),
+            ScrollDown => wheel(false, -120),
+            ScrollRight => wheel(true, 120),
             _ => wheel(true, -120),
         }
         return;
     }
-    let i = match vk {
-        KEY_U => 0,
-        KEY_O => 1,
-        KEY_H => 2,
+    let i = match act {
+        ScrollUp => 0,
+        ScrollDown => 1,
+        ScrollLeft => 2,
         _ => 3,
     };
     SCROLL[i].store(true, Relaxed);
@@ -483,13 +714,14 @@ impl Worker {
             }
         }
         let now = Instant::now();
-        let space = held(SPACE);
-        let boost = if shift_phys() { SHIFT_BOOST } else { 1.0 };
+        let c = cfg();
+        let space = held_action(Slow);
+        let boost = if shift_phys() { c.shift_boost } else { 1.0 };
         let mut active = false;
 
         // Cursor movement.
-        let dx = held(KEY_L) as i32 - held(KEY_J) as i32;
-        let dy = held(KEY_K) as i32 - held(KEY_I) as i32;
+        let dx = held_action(Right) as i32 - held_action(Left) as i32;
+        let dy = held_action(Down) as i32 - held_action(Up) as i32;
         if dx != 0 || dy != 0 {
             active = true;
             if !self.moving {
@@ -498,7 +730,7 @@ impl Worker {
             }
             let dt = (now - self.last).as_secs_f64().clamp(0.001, 0.05);
             self.last = now;
-            let vel = SPEEDS[SPEED_LEVEL.load(Relaxed) - 1] * if space { SPACE_SLOW_MOVE } else { 1.0 } * boost;
+            let vel = c.speeds[SPEED_LEVEL.load(Relaxed) - 1] * if space { c.slow_move } else { 1.0 } * boost;
             let (mut ax, mut ay) = (dx as f64, dy as f64);
             if dx != 0 && dy != 0 {
                 ax *= 0.70710678;
@@ -538,7 +770,7 @@ impl Worker {
             }
             let dt = (now - self.scroll_last).as_secs_f64().min(0.05);
             self.scroll_last = now;
-            let vel = SCROLL_SPEED * if space { SPACE_SLOW_SCROLL } else { 1.0 } * boost;
+            let vel = c.scroll_speed * if space { c.slow_scroll } else { 1.0 } * boost;
             self.sfv += v as f64 * vel * dt;
             self.sfh += h as f64 * vel * dt;
             let dv = self.sfv.round();
@@ -598,15 +830,43 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
+/// Badge rect [x, y, w, h] for a monitor: bottom-left of the work area, moved
+/// above any taskbar overlapping it (an auto-hidden taskbar slides over the
+/// work area and would otherwise cover the badge).
+fn badge_rect(mon: HMONITOR) -> [i32; 4] {
+    let r = work_area(mon);
+    let (w, h) = (px(50), px(26));
+    let (x, mut y) = (r.left + px(16), r.bottom - h - px(16));
+    unsafe {
+        let mut bar = FindWindowW(w!("Shell_TrayWnd"), None).ok();
+        let mut secondary = false;
+        while let Some(t) = bar {
+            let mut tr = RECT::default();
+            if IsWindowVisible(t).as_bool() && GetWindowRect(t, &mut tr).is_ok() {
+                let overlaps = tr.left < x + w && tr.right > x && tr.top < y + h && tr.bottom > y;
+                if overlaps {
+                    y = tr.top - h - px(16);
+                }
+            }
+            if !secondary {
+                secondary = true;
+                bar = FindWindowExW(None, None, w!("Shell_SecondaryTrayWnd"), None).ok();
+            } else {
+                bar = FindWindowExW(None, Some(t), w!("Shell_SecondaryTrayWnd"), None).ok();
+            }
+        }
+    }
+    [x, y, w, h]
+}
+
 fn update_badge(hwnd: HWND) {
     unsafe {
         let mon = cursor_monitor();
         BADGE_MONITOR.store(mon.0 as isize, Relaxed);
-        let r = work_area(mon);
-        let (w, h) = (px(50), px(26));
-        let (x, y) = (r.left + px(16), r.bottom - h - px(16));
+        let rect = badge_rect(mon);
+        let [x, y, w, h] = rect;
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
-        for (i, v) in [x, y, w, h].into_iter().enumerate() {
+        for (i, v) in rect.into_iter().enumerate() {
             BADGE_RECT[i].store(v, Relaxed);
         }
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -619,7 +879,11 @@ fn refresh_visibility(hwnd: HWND) {
     if !MODE.load(Relaxed) {
         return;
     }
-    if cursor_monitor().0 as isize != BADGE_MONITOR.load(Relaxed) {
+    let mon = cursor_monitor();
+    // Also re-place when the taskbar shows or hides.
+    if mon.0 as isize != BADGE_MONITOR.load(Relaxed)
+        || badge_rect(mon) != [0, 1, 2, 3].map(|i| BADGE_RECT[i].load(Relaxed))
+    {
         update_badge(hwnd);
         return;
     }
@@ -700,7 +964,17 @@ unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             LRESULT(0)
         }
+        WM_SAVE_SOON => {
+            // Debounce: write the state file once the speed stops changing.
+            SetTimer(Some(hwnd), TIMER_SAVE, 500, None);
+            LRESULT(0)
+        }
         WM_TIMER => {
+            if wparam.0 == TIMER_SAVE {
+                let _ = KillTimer(Some(hwnd), TIMER_SAVE);
+                save_state();
+                return LRESULT(0);
+            }
             refresh_visibility(hwnd);
             LRESULT(0)
         }
@@ -744,6 +1018,13 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
+        let mut warns = Vec::new();
+        let _ = CFG.set(load_config(&mut warns));
+        SPEED_LEVEL.store(load_state(), Relaxed);
+        if !warns.is_empty() {
+            warn_box(&warns.join("\n"));
+        }
+
         // Real Caps Lock starts off; Caps is swallowed from here on.
         if GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0 {
             tap_vk(VK_CAPITAL.0);
@@ -763,6 +1044,7 @@ fn main() {
         }
 
         release_drag();
+        save_state();
         let _ = UnhookWindowsHookEx(hook);
         let _ = WTSUnRegisterSessionNotification(hwnd);
         let _ = DestroyWindow(hwnd);
