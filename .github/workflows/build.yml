@@ -30,11 +30,10 @@ jobs:
           fetch-depth: 0
 
       - name: Build
-        working-directory: kbmouse-rs
         run: |
           rustup toolchain install stable --profile minimal
           cargo build --release --locked
-          cp target/release/kbmouse.exe ../kbmouse.exe
+          cp target/release/kbmouse.exe kbmouse.exe
 
       - name: Publish rolling build
         if: github.ref == 'refs/heads/master'

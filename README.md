@@ -7,7 +7,6 @@ Download [`kbmouse.exe`](https://github.com/templeboss/kbmouse/releases/latest/d
 ## Build
 
 ```powershell
-cd kbmouse-rs
 cargo build --release   # target\release\kbmouse.exe
 .\rebuild.ps1           # stop the running exe, rebuild, restart it
 ```
