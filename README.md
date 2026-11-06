@@ -38,6 +38,14 @@ Space slows movement only while held. Keys 1–4 jump once per press on whicheve
 
 **G** opens a 3×3 grid over the cursor's monitor, labelled like the keys (`Q W E / A S D / Z X C`; `grid_rows = 4` adds `1 2 3` on top). Each key narrows to that cell and moves the cursor to its center; **Shift** + key also left-clicks there and closes the grid. After the 4th press the grid closes on its own. **Backspace** steps back; **Enter / Esc** close it, **G** restarts with the full grid (Caps closes it and leaves mouse mode); a **click key** (`;` `N` `,`) closes it and clicks. Any other key closes it (swallowed, like G).
 
+## Rust version: hint mode
+
+**F** scans the focused window with UI Automation for clickable controls (buttons, tabs, links, checkboxes, sliders, text fields) and puts a 1-2 letter label on each. Type the label to move the cursor there and click; **Shift** + last letter only moves (then nudge with `IJKL` / `Space`, e.g. along a seek bar). **Backspace** erases a letter; **Enter / Esc / F / Caps** close it (the hint key is never used in a label). The scan runs off the input thread, so labels may appear a moment late in big windows (Chrome pages); Esc cancels. Labels are mnemonic: window **Q** = close, **W** = maximize/restore, **E** = minimize (always labelled, even in terminals); other controls get the first letter of their name (two letters, initial first, when several share it), else a free letter. The hint key itself is never a label. Apps that expose no UI Automation tree (some games, custom-drawn UIs) show no labels; use grid mode there.
+
+## Rust version: disabled apps
+
+`disabled_apps` in `kbmouse.ini` (comma-separated exe names, default `League of Legends.exe`) turns kbmouse fully off while such an app is focused: all keys pass through, Caps Lock acts as a normal Caps Lock, and mouse mode switches off on entry.
+
 ## Rust version: config and state
 
 The Rust version (`kbmouse-rs`) reads `%APPDATA%\kbmouse\kbmouse.ini`, created with defaults on first run. It sets speed levels, scroll speed, Shift boost, slow multipliers, corner jump positions and every mouse-mode key binding (keys are physical US positions, e.g. `click_left = semicolon`). Restart to apply changes. Bad values fall back to defaults and a warning box lists them at startup. Caps Lock, Shift, Ctrl and Ctrl+Alt+Q are fixed.

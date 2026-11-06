@@ -10,13 +10,16 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, BOOL, PCWSTR};
+use windows::core::{w, BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::*;
 use windows::Win32::System::Threading::*;
+use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -41,12 +44,12 @@ enum Action {
     ClickLeft, ClickRight, ClickMiddle, Drag,
     ScrollUp, ScrollDown, ScrollLeft, ScrollRight,
     SpeedUp, SpeedDown, Back, Forward, Home, End,
-    Corner1, Corner2, Corner3, Corner4, NextMonitor, Grid,
+    Corner1, Corner2, Corner3, Corner4, NextMonitor, Grid, Hint,
 }
 use Action::*;
 
 /// (config name, action, default key). Keys are physical positions (US layout).
-const BINDINGS: [(&str, Action, &str); 25] = [
+const BINDINGS: [(&str, Action, &str); 26] = [
     ("up", Up, "I"), ("down", Down, "K"), ("left", Left, "J"), ("right", Right, "L"),
     ("slow", Slow, "space"),
     ("click_left", ClickLeft, "semicolon"), ("click_right", ClickRight, "N"),
@@ -58,10 +61,11 @@ const BINDINGS: [(&str, Action, &str); 25] = [
     ("home", Home, "7"), ("end", End, "9"),
     ("corner1", Corner1, "1"), ("corner2", Corner2, "2"),
     ("corner3", Corner3, "3"), ("corner4", Corner4, "4"),
-    ("next_monitor", NextMonitor, "backtick"), ("grid", Grid, "G"),
+    ("next_monitor", NextMonitor, "backtick"), ("grid", Grid, "G"), ("hint", Hint, "F"),
 ];
 
 const DEFAULT_SPEEDS: &str = "1800, 2400, 3000, 4000, 5200";
+const DEFAULT_DISABLED: &str = "League of Legends.exe";
 const DEFAULT_JUMPS: [&str; 4] = ["0.10, 0.10", "0.90, 0.10", "0.10, 0.90", "0.90, 0.90"];
 
 struct Config {
@@ -71,6 +75,8 @@ struct Config {
     slow_move: f64,
     slow_scroll: f64,
     grid_rows: usize,
+    /// Lowercase exe names where kbmouse stays out of the way.
+    disabled_apps: Vec<String>,
     jumps: [[f64; 2]; 4],
     /// Scan code bound to each action (indexed by `Action as usize`).
     key_of: [usize; BINDINGS.len()],
@@ -138,6 +144,11 @@ fn default_config_text() -> String {
     t += "slow_move = 0.20      # slow key multiplier for movement\n";
     t += "slow_scroll = 0.25    # slow key multiplier for scrolling\n\n";
     t += "# Grid mode: 3 columns; 3 rows = QWE/ASD/ZXC, 4 rows adds 123 on top.\ngrid_rows = 3\n\n";
+    t += "# Apps where kbmouse is fully off (comma-separated exe names, e.g. games).
+";
+    t += &format!("disabled_apps = {DEFAULT_DISABLED}
+
+");
     t += "# Corner jump positions as x, y fractions of the work area (0 = left/top, 1 = right/bottom).\n";
     for (i, j) in DEFAULT_JUMPS.iter().enumerate() {
         t += &format!("jump{} = {j}\n", i + 1);
@@ -179,7 +190,7 @@ fn load_config(warns: &mut Vec<String>) -> Config {
         }
     }
     let known = |k: &str| {
-        matches!(k, "speeds" | "scroll_speed" | "shift_boost" | "slow_move" | "slow_scroll" | "grid_rows")
+        matches!(k, "speeds" | "scroll_speed" | "shift_boost" | "slow_move" | "slow_scroll" | "grid_rows" | "disabled_apps")
             || (k.len() == 5 && k.starts_with("jump") && matches!(k.as_bytes()[4], b'1'..=b'4'))
             || BINDINGS.iter().any(|b| b.0 == k)
     };
@@ -213,6 +224,14 @@ fn load_config(warns: &mut Vec<String>) -> Config {
             _ => warns.push(format!("line {n}: grid_rows must be 3 or 4")),
         }
     }
+
+    let disabled_apps = map
+        .get("disabled_apps")
+        .map_or(DEFAULT_DISABLED, |(_, v)| v.as_str())
+        .split(',')
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| !a.is_empty())
+        .collect();
 
     let mut speeds = parse_nums(DEFAULT_SPEEDS).unwrap();
     if let Some((n, v)) = map.get("speeds") {
@@ -251,7 +270,7 @@ fn load_config(warns: &mut Vec<String>) -> Config {
             action_at[sc] = Some(action);
         }
     }
-    Config { speeds, scroll_speed, shift_boost, slow_move, slow_scroll, grid_rows, jumps, key_of, action_at }
+    Config { speeds, scroll_speed, shift_boost, slow_move, slow_scroll, grid_rows, disabled_apps, jumps, key_of, action_at }
 }
 
 // ---- persisted state (speed level) ----
@@ -287,6 +306,7 @@ const WM_REFRESH: u32 = WM_APP + 1;
 const WM_MODE: u32 = WM_APP + 2;
 const WM_SAVE_SOON: u32 = WM_APP + 3;
 const WM_GRID: u32 = WM_APP + 4;
+const WM_HINT: u32 = WM_APP + 5;
 const TIMER_BADGE: usize = 1;
 const TIMER_SAVE: usize = 2;
 
@@ -300,8 +320,13 @@ static HELD: [AtomicBool; 256] = flags();
 static HELD_SC: [AtomicBool; 256] = flags();
 /// Keys whose down event we swallowed, so the matching up is swallowed too.
 static SWALLOWED: [AtomicBool; 256] = flags();
+/// Keys pressed while hint mode was open: they stay inert until released, so a
+/// label key (e.g. J = move left) can't start cursor movement after the pick.
+static HINT_USED: [AtomicBool; 256] = flags();
 /// Scroll keys armed in mouse mode: u, o, h, y.
 static SCROLL: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+/// True while the foreground app is in `disabled_apps`.
+static DISABLED: AtomicBool = AtomicBool::new(false);
 static MODE: AtomicBool = AtomicBool::new(false);
 static DRAGGING: AtomicBool = AtomicBool::new(false);
 static RESET: AtomicBool = AtomicBool::new(false);
@@ -697,6 +722,329 @@ fn create_grid() {
     }
 }
 
+// ---- hint mode ----
+// F scans the focused window with UI Automation for clickable controls and
+// labels each with 1-2 letters. Typing a label moves the cursor there and
+// clicks; with Shift it only moves (e.g. to then nudge along a seek bar).
+// Enter/Esc/Caps/F close it (the hint key is never used in a label); Backspace erases a typed letter.
+const HINT_LETTERS: &[u8; 26] = b"ASDFGHJKLQWERTYUIOPZXCVBNM";
+
+/// Label alphabet: every letter except the one bound to the hint key.
+fn hint_alphabet() -> Vec<u8> {
+    let hint_sc = cfg().key_of[Hint as usize];
+    HINT_LETTERS.iter().copied().filter(|c| key_sc(&(*c as char).to_string()) != Some(hint_sc)).collect()
+}
+
+/// Fixed label letters for the window buttons: Q close, W maximize, E minimize.
+const CAPTION_KEYS: [u8; 3] = *b"QWE";
+
+/// Rects of the window's close / maximize / minimize buttons as (role, rect).
+/// The frame draws them, so terminals and custom title bars often don't expose
+/// them to UI Automation.
+fn caption_slots(fg: isize) -> Vec<(usize, [i32; 4])> {
+    let mut out = Vec::new();
+    unsafe {
+        let hwnd = HWND(fg as *mut _);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        if style & WS_SYSMENU.0 == 0 || style & WS_CAPTION.0 != WS_CAPTION.0 {
+            return out;
+        }
+        let mut f = RECT::default();
+        if DwmGetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(9), &mut f as *mut _ as *mut _, size_of::<RECT>() as u32).is_err() {
+            return out;
+        }
+        let dpi = GetDpiForWindow(hwnd) as i32;
+        let (bw, bh) = (46 * dpi / 96, 32 * dpi / 96);
+        let mut right = f.right;
+        for (role, on) in [(0, true), (1, style & WS_MAXIMIZEBOX.0 != 0), (2, style & WS_MINIMIZEBOX.0 != 0)] {
+            if on {
+                out.push((role, [right - bw, f.top, right, f.top + bh]));
+                right -= bw;
+            }
+        }
+    }
+    out
+}
+
+struct Hint {
+    rect: [i32; 4],
+    label: String,
+}
+static HINT: AtomicBool = AtomicBool::new(false);
+static HINT_GEN: AtomicUsize = AtomicUsize::new(0);
+static HINT_HWND: AtomicIsize = AtomicIsize::new(0);
+static HINTS: Mutex<Vec<Hint>> = Mutex::new(Vec::new());
+static HINT_TYPED: Mutex<String> = Mutex::new(String::new());
+
+/// Scans the window and labels controls. Window buttons get fixed letters
+/// (CAPTION_KEYS); other controls get the first letter of their name when that
+/// is unambiguous (two letters, name initial first, when several share it), and
+/// the remaining free letters otherwise. Labels never prefix one another.
+fn enumerate_hints(fg: isize) -> Vec<Hint> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let found = (|| -> windows::core::Result<Vec<([i32; 4], String)>> {
+            let ua: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+            let root = ua.ElementFromHandle(HWND(fg as *mut _))?;
+            let cache = ua.CreateCacheRequest()?;
+            cache.AddProperty(UIA_BoundingRectanglePropertyId)?;
+            cache.AddProperty(UIA_NamePropertyId)?;
+            let prop = |id, v: bool| ua.CreatePropertyCondition(id, &VARIANT::from(v));
+            let mut any = prop(UIA_IsInvokePatternAvailablePropertyId, true)?;
+            for id in [
+                UIA_IsTogglePatternAvailablePropertyId,
+                UIA_IsSelectionItemPatternAvailablePropertyId,
+                UIA_IsExpandCollapsePatternAvailablePropertyId,
+                UIA_IsRangeValuePatternAvailablePropertyId,
+                UIA_IsValuePatternAvailablePropertyId,
+            ] {
+                any = ua.CreateOrCondition(&any, &prop(id, true)?)?;
+            }
+            // Buttons and friends even when they expose no action pattern.
+            for ct in [
+                UIA_ButtonControlTypeId, UIA_TabItemControlTypeId, UIA_MenuItemControlTypeId,
+                UIA_CheckBoxControlTypeId, UIA_RadioButtonControlTypeId, UIA_HyperlinkControlTypeId,
+                UIA_SplitButtonControlTypeId, UIA_ListItemControlTypeId, UIA_TreeItemControlTypeId,
+            ] {
+                let c = ua.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(ct.0))?;
+                any = ua.CreateOrCondition(&any, &c)?;
+            }
+            let cond = ua.CreateAndCondition(&any, &prop(UIA_IsOffscreenPropertyId, false)?)?;
+            let cond = ua.CreateAndCondition(&cond, &prop(UIA_IsEnabledPropertyId, true)?)?;
+            let all = root.FindAllBuildCache(TreeScope_Descendants, &cond, &cache)?;
+            let mut v = Vec::new();
+            for i in 0..all.Length()? {
+                let Ok(e) = all.GetElement(i) else { continue };
+                if let Ok(r) = e.CachedBoundingRectangle() {
+                    if r.right > r.left && r.bottom > r.top {
+                        let name = e.CachedName().map(|n| n.to_string()).unwrap_or_default();
+                        v.push(([r.left, r.top, r.right, r.bottom], name));
+                    }
+                }
+            }
+            Ok(v)
+        })();
+        let mut items = found.unwrap_or_default();
+        items.sort_by_key(|(r, _)| (r[1], r[0]));
+        items.dedup_by_key(|(r, _)| ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2));
+
+        let all_letters = hint_alphabet();
+        let reserved: Vec<u8> = CAPTION_KEYS.iter().copied().filter(|c| all_letters.contains(c)).collect();
+        let abc: Vec<u8> = all_letters.iter().copied().filter(|c| !reserved.contains(c)).collect();
+        let l = abc.len();
+        let mut out: Vec<Hint> = Vec::new();
+
+        // Window buttons: fixed letters; drop any UIA duplicate of the same button.
+        for (role, b) in caption_slots(fg) {
+            let key = CAPTION_KEYS[role];
+            if !reserved.contains(&key) {
+                continue;
+            }
+            let (cx, cy) = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
+            let (hw, hh) = ((b[2] - b[0]) / 2, b[3] - b[1]);
+            items.retain(|(r, _)| ((r[0] + r[2]) / 2 - cx).abs() >= hw || ((r[1] + r[3]) / 2 - cy).abs() >= hh);
+            out.push(Hint { rect: b, label: (key as char).to_string() });
+        }
+        if l == 0 {
+            return out;
+        }
+
+        // Group the rest by the initial of their name.
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); l];
+        let mut rest: Vec<usize> = Vec::new();
+        for (i, (_, name)) in items.iter().enumerate() {
+            let init = name.trim().chars().next().filter(|c| c.is_ascii_alphabetic()).map(|c| c.to_ascii_uppercase() as u8);
+            match init.and_then(|c| abc.iter().position(|a| *a == c)) {
+                Some(g) => groups[g].push(i),
+                None => rest.push(i),
+            }
+        }
+        let mut labels: Vec<Option<String>> = vec![None; items.len()];
+        let mut used = vec![false; l];
+        for (g, mem) in groups.iter().enumerate() {
+            if mem.is_empty() {
+                continue;
+            }
+            used[g] = true;
+            if mem.len() == 1 {
+                labels[mem[0]] = Some((abc[g] as char).to_string());
+            } else {
+                for (k, &m) in mem.iter().take(l).enumerate() {
+                    labels[m] = Some(format!("{}{}", abc[g] as char, abc[k] as char));
+                }
+                rest.extend(mem.iter().skip(l));
+            }
+        }
+        rest.sort_unstable();
+        let free: Vec<usize> = (0..l).filter(|g| !used[*g]).collect();
+        for (j, &m) in rest.iter().enumerate() {
+            labels[m] = if rest.len() <= free.len() {
+                Some((abc[free[j]] as char).to_string())
+            } else {
+                free.get(j / l).map(|f| format!("{}{}", abc[*f] as char, abc[j % l] as char))
+            };
+        }
+        for ((rect, _), label) in items.into_iter().zip(labels) {
+            if let Some(label) = label {
+                out.push(Hint { rect, label });
+            }
+        }
+        out
+    }
+}
+
+fn open_hint() {
+    close_grid();
+    // Prefer the window the foreground event reported: right after Alt+Tab,
+    // GetForegroundWindow can still return the window just left.
+    let ev = FG_EVENT.load(Relaxed);
+    let fg = if ev != 0 && unsafe { IsWindow(Some(HWND(ev as *mut _))) }.as_bool() {
+        ev
+    } else {
+        unsafe { GetForegroundWindow() }.0 as isize
+    };
+    let gen = HINT_GEN.fetch_add(1, Relaxed) + 1;
+    HINTS.lock().unwrap().clear();
+    HINT_TYPED.lock().unwrap().clear();
+    HINT.store(true, Relaxed);
+    // UI Automation can be slow; keep it off the hook thread.
+    std::thread::spawn(move || {
+        let list = enumerate_hints(fg);
+        if HINT.load(Relaxed) && HINT_GEN.load(Relaxed) == gen {
+            *HINTS.lock().unwrap() = list;
+            post(WM_HINT);
+        }
+    });
+}
+
+fn close_hint() {
+    if HINT.swap(false, Relaxed) {
+        HINT_GEN.fetch_add(1, Relaxed);
+        HINTS.lock().unwrap().clear();
+        post(WM_HINT);
+    }
+}
+
+fn hint_key(vk: usize, act: Option<Action>, shift: bool) {
+    if matches!(vk, 0x0D | 0x1B) || act == Some(Hint) {
+        return close_hint();
+    }
+    if vk == 0x08 {
+        HINT_TYPED.lock().unwrap().pop();
+        return post(WM_HINT);
+    }
+    if !(0x41..=0x5A).contains(&vk) {
+        return close_hint();
+    }
+    let mut typed = HINT_TYPED.lock().unwrap();
+    typed.push(vk as u8 as char);
+    let hints = HINTS.lock().unwrap();
+    let hit = hints.iter().find(|h| h.label == *typed).map(|h| h.rect);
+    let any = hints.iter().any(|h| h.label.starts_with(typed.as_str()));
+    drop(hints);
+    if !any {
+        typed.pop(); // no such label: ignore the key
+        return;
+    }
+    drop(typed);
+    match hit {
+        Some(r) => {
+            close_hint();
+            move_to((r[0] + r[2] - 1) / 2, (r[1] + r[3] - 1) / 2);
+            if !shift {
+                click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+            }
+        }
+        None => post(WM_HINT),
+    }
+}
+
+fn virtual_rect() -> [i32; 4] {
+    unsafe {
+        let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+        [x, y, GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)]
+    }
+}
+
+fn update_hint() {
+    let h = HWND(HINT_HWND.load(Relaxed) as *mut _);
+    unsafe {
+        if HINT.load(Relaxed) && !HINTS.lock().unwrap().is_empty() {
+            let [x, y, w, hh] = virtual_rect();
+            let _ = SetWindowPos(h, Some(HWND_TOPMOST), x, y, w, hh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let _ = InvalidateRect(Some(h), None, false);
+        } else {
+            let _ = ShowWindow(h, SW_HIDE);
+        }
+    }
+}
+
+fn paint_hint(hwnd: HWND) {
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        let dc = BeginPaint(hwnd, &mut ps);
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let keyb = CreateSolidBrush(GRID_KEY_COLOR);
+        FillRect(dc, &rc, keyb);
+        let _ = DeleteObject(keyb.into());
+
+        let font = CreateFontW(
+            -px(13), 0, 0, 0, 700, 0, 0, 0,
+            FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
+            FONT_QUALITY(5), 0, w!("Segoe UI"),
+        );
+        let old_font = SelectObject(dc, font.into());
+        let bg = CreateSolidBrush(rgb(0x17, 0x21, 0x2B));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, rgb(0xF2, 0xA3, 0x3A));
+        let [vx, vy, _, _] = virtual_rect();
+        let typed = HINT_TYPED.lock().unwrap().clone();
+        for hint in HINTS.lock().unwrap().iter() {
+            if !hint.label.starts_with(&typed) {
+                continue;
+            }
+            let mut rest: Vec<u16> = hint.label[typed.len()..].encode_utf16().collect();
+            let (pw, ph) = (px(9) * rest.len() as i32 + px(8), px(18));
+            let (x, y) = (hint.rect[0] - vx, hint.rect[1] - vy);
+            let mut pill = RECT { left: x, top: y, right: x + pw, bottom: y + ph };
+            FillRect(dc, &pill, bg);
+            DrawTextW(dc, &mut rest, &mut pill, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        SelectObject(dc, old_font);
+        let _ = DeleteObject(bg.into());
+        let _ = DeleteObject(font.into());
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_hint(hwnd);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn create_hint() {
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+        let class = w!("kbmouse_hint");
+        let wc = WNDCLASSW { lpfnWndProc: Some(hint_proc), hInstance: hinst, lpszClassName: class, ..Default::default() };
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            class, w!("Keyboard mouse hints"), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst), None,
+        )
+        .unwrap();
+        let _ = SetLayeredWindowAttributes(hwnd, GRID_KEY_COLOR, 235, LWA_COLORKEY | LWA_ALPHA);
+        HINT_HWND.store(hwnd.0 as isize, Relaxed);
+    }
+}
+
 // ---- mode / drag / speed ----
 fn post(msg: u32) {
     let h = BADGE.load(Relaxed);
@@ -716,6 +1064,7 @@ fn set_mode(on: bool) {
     if !on {
         release_drag();
         close_grid();
+        close_hint();
     }
     post(WM_MODE);
     wake();
@@ -735,6 +1084,7 @@ fn release_all() {
         HELD[i].store(false, Relaxed);
         HELD_SC[i].store(false, Relaxed);
         SWALLOWED[i].store(false, Relaxed);
+        HINT_USED[i].store(false, Relaxed);
     }
     set_mode(false);
 }
@@ -757,6 +1107,36 @@ fn change_speed(delta: isize) {
     SPEED_LEVEL.store(lvl as usize, Relaxed);
     post(WM_REFRESH);
     post(WM_SAVE_SOON);
+}
+
+// ---- per-app disable ----
+fn exe_name(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 520];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(h);
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        ok.then(|| path.rsplit('\\').next().unwrap_or("").to_lowercase())
+    }
+}
+
+fn check_foreground() {
+    let hit = exe_name(unsafe { GetForegroundWindow() }).is_some_and(|n| cfg().disabled_apps.contains(&n));
+    if DISABLED.swap(hit, Relaxed) != hit && hit {
+        set_mode(false); // also releases drag and closes the grid
+    }
+}
+
+/// Window that most recently became foreground, as reported by the event hook.
+static FG_EVENT: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
+    FG_EVENT.store(hwnd.0 as isize, Relaxed);
+    check_foreground();
 }
 
 // ---- keyboard hook ----
@@ -797,6 +1177,18 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         None
     };
 
+    if HINT_USED[vk].load(Relaxed) {
+        if up {
+            HINT_USED[vk].store(false, Relaxed);
+        } else {
+            if k.flags.0 & 1 == 0 && sc < 256 {
+                HELD_SC[sc].store(false, Relaxed);
+            }
+            SWALLOWED[vk].store(true, Relaxed);
+            return true;
+        }
+    }
+
     if up {
         match act {
             Some(ScrollUp) => SCROLL[0].store(false, Relaxed),
@@ -819,6 +1211,11 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     if vk == LSHIFT && !up && SCROLLING.load(Relaxed) {
         SHIFT_HIDDEN.store(true, Relaxed);
         return true;
+    }
+
+    // Disabled app focused: everything passes through, including Caps Lock.
+    if DISABLED.load(Relaxed) {
+        return up && SWALLOWED[vk].swap(false, Relaxed);
     }
 
     // Caps Lock: toggle mouse mode. Shift+Caps toggles the real Caps Lock.
@@ -882,6 +1279,22 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         return true;
     }
 
+    // Hint mode: letters pick a label; modifiers pass through.
+    if HINT.load(Relaxed) {
+        if matches!(vk, 0xA0..=0xA5 | 0x10..=0x12 | 0x5B | 0x5C) {
+            return false;
+        }
+        if !repeat {
+            hint_key(vk, act, shift_phys());
+        }
+        HINT_USED[vk].store(true, Relaxed);
+        if k.flags.0 & 1 == 0 && sc < 256 {
+            HELD_SC[sc].store(false, Relaxed);
+        }
+        SWALLOWED[vk].store(true, Relaxed);
+        return true;
+    }
+
     let Some(act) = act else {
         return false;
     };
@@ -923,6 +1336,11 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         Grid => {
             if !repeat {
                 open_grid();
+            }
+        }
+        Hint => {
+            if !repeat {
+                open_hint();
             }
         }
     }
@@ -997,7 +1415,7 @@ impl Worker {
         let mut active = false;
 
         // Cursor movement.
-        let grid = GRID.load(Relaxed);
+        let grid = GRID.load(Relaxed) || HINT.load(Relaxed);
         let dx = if grid { 0 } else { held_action(Right) as i32 - held_action(Left) as i32 };
         let dy = if grid { 0 } else { held_action(Down) as i32 - held_action(Up) as i32 };
         if dx != 0 || dy != 0 {
@@ -1240,6 +1658,10 @@ unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             update_grid();
             LRESULT(0)
         }
+        WM_HINT => {
+            update_hint();
+            LRESULT(0)
+        }
         WM_SAVE_SOON => {
             // Debounce: write the state file once the speed stops changing.
             SetTimer(Some(hwnd), TIMER_SAVE, 500, None);
@@ -1308,9 +1730,14 @@ fn main() {
 
         let hwnd = create_badge();
         create_grid();
+        create_hint();
         let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(hinst), 0).unwrap();
+        let winhook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT,
+        );
+        check_foreground();
         let t = std::thread::spawn(worker);
         let _ = WORKER.set(t.thread().clone());
 
@@ -1322,7 +1749,9 @@ fn main() {
 
         release_drag();
         close_grid();
+        close_hint();
         save_state();
+        let _ = UnhookWinEvent(winhook);
         let _ = UnhookWindowsHookEx(hook);
         let _ = WTSUnRegisterSessionNotification(hwnd);
         let _ = DestroyWindow(hwnd);
