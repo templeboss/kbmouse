@@ -1,61 +1,90 @@
-﻿# Keyboard mouse
+﻿# kbmouse
 
-Run `kbmouse.ahk` with [AutoHotkey v2](https://www.autohotkey.com/) on Windows.
-Press **Caps Lock** to toggle mouse mode. Caps Lock's normal function is disabled while the script runs.
+Drive the mouse from the keyboard on Windows. Caps Lock toggles a mouse layer; while it is on, home-row keys move the cursor, click, scroll and jump around the screen.
 
-A click-through badge appears in the bottom-left corner of the monitor the cursor is on (it follows the cursor across monitors), above the taskbar, while mouse mode is on. It shows a mouse icon and the speed level (1–5); the icon turns amber while drag is held. The badge hides while the cursor is over its area and reappears when the cursor moves away. Turning mouse mode off hides it. Movement polling stops when all movement keys are released, and quitting releases any active drag.
+Get `kbmouse.exe` from [Releases](https://github.com/templeboss/kbmouse/releases) and run it. It asks for admin rights (UAC) on start so it also works over elevated windows.
 
-## Controls
+## Build
 
-These bindings apply in mouse mode; Caps Lock and Ctrl+Alt+Q work in either mode.
+```powershell
+cd kbmouse-rs
+cargo build --release   # target\release\kbmouse.exe
+.\rebuild.ps1           # stop the running exe, rebuild, restart it
+```
+
+## Mode
 
 | Key | Action |
 | --- | --- |
-| I / J / K / L | Move up / left / down / right |
-| Space + movement | Precision movement (20% speed) |
-| (startup) | Script relaunches itself elevated (UAC prompt on each start) |
-| Shift + movement / scroll | Speed boost (1.5× movement, 2× scroll) |
-| 1 / 2 / 3 / 4 | Jump near top-left / top-right / bottom-left / bottom-right corners of the cursor's current monitor (top number row) |
-| ` | Jump to the center of the next monitor (cycles) |
-| ; | Left click (physical US semicolon key, `SC027`) |
+| Caps Lock | Toggle mouse mode (releases drag) |
+| Shift + Caps Lock | Toggle the real Caps Lock |
+| Ctrl + Alt + Q | Quit |
+
+A badge in the bottom-left of the cursor's monitor shows the speed level while mouse mode is on. It turns amber while dragging and hides when the cursor is over it.
+
+Click the tray icon for **Edit settings**, **Open settings folder**, **Reload settings** and **Quit**.
+
+## Mouse mode keys
+
+Defaults; every one can be rebound (see [Config](#config)). Keys are physical US-layout positions.
+
+| Key | Action |
+| --- | --- |
+| I / J / K / L | Move up / left / down / right (combine for diagonals) |
+| Space + move / scroll | Slow (20% movement, 25% scroll) |
+| Shift + move / scroll | Fast (3×) |
+| ; | Left click |
 | N | Right click |
 | , | Middle click |
-| M | Toggle left-button hold for dragging |
+| M | Toggle left-button hold (drag) |
 | U / O | Scroll up / down |
 | H / Y | Scroll left / right |
-| B / V | Browser forward / back |
-| P / . | Increase / decrease speed |
-| Caps Lock | Toggle mouse mode; turning it off releases a drag |
-| Ctrl+Alt+Q | Quit the script |
+| Ctrl + U / O | One wheel notch per press (Ctrl + wheel zoom) |
+| P / . | Speed level up / down |
+| V / B | Browser back / forward (Ctrl + V / B pass through) |
+| 7 / 9 | Home / End |
+| 1 / 2 / 3 / 4 | Jump to top-left / top-right / bottom-left / bottom-right of the current monitor |
+| ` | Jump to the center of the next monitor |
+| G | Grid mode |
+| F | Hint mode |
 
-Hold movement keys for continuous movement; combine directions for diagonals.
-Speed levels are **1800, 2400, 3000 (default), 4000, 5200 px/s** and reset on restart.
-Holding a scroll key scrolls smoothly and continuously (tune `scrollSpeed`); a tap scrolls in proportion to how long the key is held. Space slows scrolling too. Ctrl + U / O sends whole notches, so it zooms like Ctrl + wheel.
+Holding a scroll key scrolls smoothly; a short tap scrolls in proportion to how long it was held. Unbound keys type normally. The speed level is remembered between runs.
 
-Space slows movement only while held. Keys 1–4 jump once per press on whichever monitor currently contains the cursor, landing 10% in from the edges of its usable area, excluding the taskbar. Customize the four `[x, y]` fractions in `jumpPositions` near the top of the script (`0.0` is left/top, `0.5` center, `1.0` right/bottom). `` ` `` moves the cursor to the center of the next monitor, cycling through all of them. These number keys and `` ` `` type normally outside mouse mode.
+### Grid mode
 
-## Rust version: grid mode
+**G** covers the cursor's monitor with a 3×3 grid labelled `Q W E / A S D / Z X C` (`grid_rows = 4` adds `1 2 3` on top). Each key narrows to that cell and moves the cursor to its center; it closes on its own after the 4th press.
 
-**G** opens a 3×3 grid over the cursor's monitor, labelled like the keys (`Q W E / A S D / Z X C`; `grid_rows = 4` adds `1 2 3` on top). Each key narrows to that cell and moves the cursor to its center; **Shift** + key also left-clicks there and closes the grid. After the 4th press the grid closes on its own. **Backspace** steps back; **Enter / Esc** close it, **G** restarts with the full grid (Caps closes it and leaves mouse mode); a **click key** (`;` `N` `,`) closes it and clicks. Any other key closes it (swallowed, like G).
+- **Shift** + cell key: left-click there and close
+- `;` / `N` / `,`: close and click
+- **Backspace**: step back
+- **G**: start over with the full grid
+- **Enter / Esc** or any other key: close
 
-## Rust version: hint mode
+### Hint mode
 
-**F** scans the focused window with UI Automation for clickable controls (buttons, tabs, links, checkboxes, sliders, text fields) and puts a 1-2 letter label on each. Type the label to move the cursor there and click; **Shift** + last letter only moves (then nudge with `IJKL` / `Space`, e.g. along a seek bar). **Backspace** erases a letter; **Enter / Esc / F / Caps** close it (the hint key is never used in a label). The scan runs off the input thread, so labels may appear a moment late in big windows (Chrome pages); Esc cancels. Labels are mnemonic: window **Q** = close, **W** = maximize/restore, **E** = minimize (always labelled, even in terminals); other controls get the first letter of their name (two letters, initial first, when several share it), else a free letter. The hint key itself is never a label. Apps that expose no UI Automation tree (some games, custom-drawn UIs) show no labels; use grid mode there.
+**F** scans the focused window with UI Automation and labels its clickable controls (buttons, tabs, links, checkboxes, sliders, text fields) with one or two letters. Type a label to move there and click.
 
-## Rust version: disabled apps
+- **Shift** + last letter: move only, without clicking (e.g. to nudge along a seek bar)
+- **Backspace**: erase a letter
+- **Enter / Esc / F / Caps Lock**: close
 
-`disabled_apps` in `kbmouse.ini` (comma-separated exe names, default `League of Legends.exe`) turns kbmouse fully off while such an app is focused: all keys pass through, Caps Lock acts as a normal Caps Lock, and mouse mode switches off on entry.
+Labels follow names where they can: **Q** close, **W** maximize/restore, **E** minimize for the window, otherwise the control's first letter. In large windows (e.g. browser pages) labels can take a moment to appear. Apps with no UI Automation tree (many games, custom-drawn UIs) get no labels; use grid mode there.
 
-## Rust version: config and state
+## Config
 
-The Rust version (`kbmouse-rs`) reads `%APPDATA%\kbmouse\kbmouse.ini`, created with defaults on first run. It sets speed levels, scroll speed, Shift boost, slow multipliers, corner jump positions and every mouse-mode key binding (keys are physical US positions, e.g. `click_left = semicolon`). Restart to apply changes. Bad values fall back to defaults and a warning box lists them at startup. Caps Lock, Shift, Ctrl and Ctrl+Alt+Q are fixed.
+`%APPDATA%\kbmouse\kbmouse.ini` is created with defaults and comments on first run; open it from the tray icon. Use **Reload settings** in the tray menu to apply changes. Invalid lines fall back to their defaults and are listed in a warning.
 
-The current speed level is saved to `%APPDATA%\kbmouse\state.ini` and restored on start.
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `speeds` | `1800, 2400, 3000, 4000, 5200` | Speed levels in px/s (1–9 values) |
+| `scroll_speed` | `1200` | Wheel units/s (120 = one notch) |
+| `shift_boost` | `3.0` | Shift multiplier |
+| `slow_move` / `slow_scroll` | `0.20` / `0.25` | Space multipliers |
+| `grid_rows` | `3` | Grid rows, 3 or 4 |
+| `disabled_apps` | `League of Legends.exe` | Exe names where kbmouse is fully off |
+| `jump1`–`jump4` | 10% in from each corner | Corner jump targets as `x, y` fractions of the work area |
+| `up`, `click_left`, … | see table above | Key bindings |
 
-## Troubleshooting
+While a `disabled_apps` program is focused, every key passes through, Caps Lock works normally and mouse mode turns off.
 
-- Keys type letters: press Caps Lock to enable mouse mode.
-- Need normal typing: press Caps Lock to disable mouse mode.
-- Script won't start: check that AutoHotkey **v2** is installed.
-- An app ignores movement: try a normal desktop app; elevated apps and games may handle simulated input differently.
-- Change bindings: edit `kbmouse.ahk` and reload it. Movement keys are also read in `MovePointer()`.
+Caps Lock, Shift, Ctrl and Ctrl + Alt + Q cannot be rebound.
