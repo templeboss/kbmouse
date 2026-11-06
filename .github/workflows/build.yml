@@ -1,5 +1,5 @@
 # Builds kbmouse.exe and publishes it:
-# - push to master -> rolling "latest" prerelease (always the newest build)
+# - push to master -> rolling "latest" release, marked Latest (always the newest build)
 # - push of a vX.Y.Z tag -> versioned release with the commit log since the previous tag
 name: build
 
@@ -39,7 +39,7 @@ jobs:
         if: github.ref == 'refs/heads/master'
         run: |
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest kbmouse.exe --prerelease --target "$GITHUB_SHA" \
+          gh release create latest kbmouse.exe --latest --target "$GITHUB_SHA" \
             --title "Latest build" \
             --notes "Built from $GITHUB_SHA: $(git log -1 --format=%s)"
 
@@ -52,5 +52,5 @@ jobs:
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release upload "$tag" kbmouse.exe --clobber
           else
-            gh release create "$tag" kbmouse.exe --title "$tag" --notes-file notes.md
+            gh release create "$tag" kbmouse.exe --title "$tag" --notes-file notes.md --latest=false
           fi

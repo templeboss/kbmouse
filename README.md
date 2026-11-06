@@ -2,7 +2,7 @@
 
 Drive the mouse from the keyboard on Windows. Caps Lock toggles a mouse layer; while it is on, home-row keys move the cursor, click, scroll and jump around the screen.
 
-Download [`kbmouse.exe`](https://github.com/templeboss/kbmouse/releases/latest/download/kbmouse.exe) (latest version) or the [newest build of master](https://github.com/templeboss/kbmouse/releases/download/latest/kbmouse.exe) and run it. It asks for admin rights (UAC) on start so it also works over elevated windows.
+Download [`kbmouse.exe`](https://github.com/templeboss/kbmouse/releases/latest/download/kbmouse.exe) (built from the newest commit) and run it. It asks for admin rights (UAC) on start so it also works over elevated windows.
 
 ## Build
 
