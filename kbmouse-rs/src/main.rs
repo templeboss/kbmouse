@@ -6,7 +6,8 @@
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::*;
+use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -84,9 +86,13 @@ struct Config {
     action_at: [Option<Action>; 256],
 }
 
-static CFG: OnceLock<Config> = OnceLock::new();
-fn cfg() -> &'static Config {
-    CFG.get().expect("config loaded before hooks")
+/// Current config; swapped whole on reload, so readers keep a consistent snapshot.
+static CFG: RwLock<Option<Arc<Config>>> = RwLock::new(None);
+fn cfg() -> Arc<Config> {
+    CFG.read().unwrap().clone().expect("config loaded before hooks")
+}
+fn set_cfg(c: Config) {
+    *CFG.write().unwrap() = Some(Arc::new(c));
 }
 
 /// Physical key position -> set-1 scan code (US layout names).
@@ -162,17 +168,24 @@ fn default_config_text() -> String {
 
 /// Reads `kbmouse.ini` (creating it with defaults if missing). Bad values fall
 /// back to defaults and are collected in `warns`.
+fn config_path() -> Option<std::path::PathBuf> {
+    Some(appdata_dir()?.join("kbmouse.ini"))
+}
+
+/// Writes the default config if the file doesn't exist yet.
+fn ensure_config_file(p: &std::path::Path) {
+    if !p.exists() {
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        let _ = std::fs::write(p, default_config_text());
+    }
+}
+
 fn load_config(warns: &mut Vec<String>) -> Config {
-    let dir = appdata_dir();
-    let path = dir.as_ref().map(|d| d.join("kbmouse.ini"));
     let mut text = String::new();
-    if let Some(p) = &path {
-        match std::fs::read_to_string(p) {
+    if let Some(p) = config_path() {
+        ensure_config_file(&p);
+        match std::fs::read_to_string(&p) {
             Ok(t) => text = t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let _ = std::fs::create_dir_all(dir.as_ref().unwrap());
-                let _ = std::fs::write(p, default_config_text());
-            }
             Err(e) => warns.push(format!("cannot read {}: {e}", p.display())),
         }
     }
@@ -1110,6 +1123,31 @@ fn change_speed(delta: isize) {
     post(WM_SAVE_SOON);
 }
 
+/// Re-reads `kbmouse.ini` and swaps it in. Grid and hint close and motion
+/// stops, since bindings and grid size may change under them.
+fn reload_config() {
+    let mut warns = Vec::new();
+    let new = load_config(&mut warns);
+    // Shrink the level before the swap so it is valid for both configs.
+    let lvl = SPEED_LEVEL.load(Relaxed).clamp(1, new.speeds.len());
+    if SPEED_LEVEL.swap(lvl, Relaxed) != lvl {
+        post(WM_SAVE_SOON);
+    }
+    set_cfg(new);
+    close_grid();
+    close_hint();
+    for s in &SCROLL {
+        s.store(false, Relaxed);
+    }
+    RESET.store(true, Relaxed);
+    wake();
+    post(WM_REFRESH);
+    check_foreground();
+    if !warns.is_empty() {
+        warn_box(&warns.join("\n"));
+    }
+}
+
 // ---- per-app disable ----
 fn exe_name(hwnd: HWND) -> Option<String> {
     unsafe {
@@ -1707,6 +1745,196 @@ fn create_badge() -> HWND {
     }
 }
 
+// ---- tray icon ----
+const WM_TRAY: u32 = WM_APP + 6;
+const ID_EDIT: usize = 1;
+const ID_FOLDER: usize = 2;
+const ID_RELOAD: usize = 3;
+const ID_QUIT: usize = 4;
+/// "TaskbarCreated": Explorer restarted (or DPI changed); the icon must be re-added.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static TRAY_ICON: AtomicIsize = AtomicIsize::new(0);
+
+/// Badge look at tray size: green mouse glyph on a rounded dark square,
+/// built per pixel so the corners and glyph edges are antialiased.
+fn make_tray_icon() -> HICON {
+    unsafe {
+        let s = GetSystemMetrics(SM_CXSMICON);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: s,
+                biHeight: -s,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let dc = CreateCompatibleDC(None);
+        let Ok(color) = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(dc);
+            return HICON::default();
+        };
+        // Glyph coverage: white on black, grayscale antialiasing.
+        let old = SelectObject(dc, color.into());
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, rgb(255, 255, 255));
+        let font = CreateFontW(
+            -(s * 3 / 4), 0, 0, 0, 400, 0, 0, 0,
+            FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
+            FONT_QUALITY(4), 0, w!("Segoe Fluent Icons"),
+        );
+        let old_font = SelectObject(dc, font.into());
+        let mut rc = RECT { left: 0, top: 0, right: s, bottom: s };
+        DrawTextW(dc, &mut [0xE962u16], &mut rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        let _ = GdiFlush();
+        SelectObject(dc, old_font);
+        SelectObject(dc, old);
+        let _ = DeleteObject(font.into());
+        let _ = DeleteDC(dc);
+
+        let px = std::slice::from_raw_parts_mut(bits as *mut u32, (s * s) as usize);
+        let (bg, fg) = ([0x17, 0x21, 0x2B], [0x76, 0xE4, 0xAD]);
+        let (sf, r) = (s as f64, s as f64 / 4.0);
+        for (i, p) in px.iter_mut().enumerate() {
+            let g = ((*p >> 8) & 0xFF) as f64 / 255.0;
+            let (cx, cy) = ((i as i32 % s) as f64 + 0.5, (i as i32 / s) as f64 + 0.5);
+            let dx = (r - cx).max(cx - (sf - r)).max(0.0);
+            let dy = (r - cy).max(cy - (sf - r)).max(0.0);
+            let a = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+            let ch = |k: usize| ((bg[k] as f64 * (1.0 - g) + fg[k] as f64 * g) * a).round() as u32;
+            *p = ((a * 255.0).round() as u32) << 24 | ch(0) << 16 | ch(1) << 8 | ch(2);
+        }
+
+        let mask = CreateBitmap(s, s, 1, 1, None);
+        let info = ICONINFO { fIcon: true.into(), hbmMask: mask, hbmColor: color, ..Default::default() };
+        let icon = CreateIconIndirect(&info).unwrap_or_default();
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+        icon
+    }
+}
+
+fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    let mut d = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uCallbackMessage: WM_TRAY,
+        hIcon: HICON(TRAY_ICON.load(Relaxed) as *mut _),
+        ..Default::default()
+    };
+    for (dst, src) in d.szTip.iter_mut().zip("kbmouse".encode_utf16()) {
+        *dst = src;
+    }
+    d
+}
+
+/// Adds the icon, rebuilding it so it matches the current DPI.
+fn add_tray(hwnd: HWND) {
+    let old = TRAY_ICON.swap(make_tray_icon().0 as isize, Relaxed);
+    unsafe {
+        if old != 0 {
+            let _ = DestroyIcon(HICON(old as *mut _));
+        }
+        let _ = Shell_NotifyIconW(NIM_ADD, &tray_data(hwnd));
+    }
+}
+
+fn remove_tray(hwnd: HWND) {
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(hwnd));
+        let icon = TRAY_ICON.swap(0, Relaxed);
+        if icon != 0 {
+            let _ = DestroyIcon(HICON(icon as *mut _));
+        }
+    }
+}
+
+fn shell_open(path: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
+    }
+}
+
+fn tray_menu(hwnd: HWND) {
+    unsafe {
+        let Ok(m) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(m, MF_STRING, ID_EDIT, w!("Edit settings"));
+        let _ = AppendMenuW(m, MF_STRING, ID_FOLDER, w!("Open settings folder"));
+        let _ = AppendMenuW(m, MF_STRING, ID_RELOAD, w!("Reload settings"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(m, MF_STRING, ID_QUIT, w!("Quit"));
+        // Foreground first, or the menu won't close when clicking elsewhere.
+        let p = cursor();
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, None, hwnd, None);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(m);
+        match cmd.0 as usize {
+            ID_EDIT => {
+                if let Some(p) = config_path() {
+                    ensure_config_file(&p);
+                    shell_open(&p);
+                }
+            }
+            ID_FOLDER => {
+                if let Some(p) = config_path() {
+                    ensure_config_file(&p);
+                    shell_open(p.parent().unwrap());
+                }
+            }
+            ID_RELOAD => reload_config(),
+            ID_QUIT => PostQuitMessage(0),
+            _ => {}
+        }
+    }
+}
+
+unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT { unsafe {
+    match msg {
+        WM_TRAY => {
+            if matches!(lparam.0 as u32 & 0xFFFF, WM_LBUTTONUP | WM_RBUTTONUP) {
+                tray_menu(hwnd);
+            }
+            LRESULT(0)
+        }
+        m if m != 0 && m == TASKBAR_CREATED.load(Relaxed) => {
+            add_tray(hwnd);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}}
+
+/// Hidden window that owns the tray icon.
+fn create_tray() -> HWND {
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+        let class = w!("kbmouse_tray");
+        let wc = WNDCLASSW { lpfnWndProc: Some(tray_proc), hInstance: hinst, lpszClassName: class, ..Default::default() };
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW, class, w!("kbmouse"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None,
+        )
+        .unwrap();
+        // kbmouse runs elevated; let the (non-elevated) shell's messages through.
+        let created = RegisterWindowMessageW(w!("TaskbarCreated"));
+        TASKBAR_CREATED.store(created, Relaxed);
+        for m in [created, WM_TRAY] {
+            let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
+        }
+        add_tray(hwnd);
+        hwnd
+    }
+}
+
 fn main() {
     unsafe {
         // One instance only.
@@ -1718,7 +1946,7 @@ fn main() {
         let _ = SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
         let mut warns = Vec::new();
-        let _ = CFG.set(load_config(&mut warns));
+        set_cfg(load_config(&mut warns));
         SPEED_LEVEL.store(load_state(), Relaxed);
         if !warns.is_empty() {
             warn_box(&warns.join("\n"));
@@ -1732,6 +1960,7 @@ fn main() {
         let hwnd = create_badge();
         create_grid();
         create_hint();
+        let tray = create_tray();
         let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(hinst), 0).unwrap();
@@ -1752,6 +1981,8 @@ fn main() {
         close_grid();
         close_hint();
         save_state();
+        remove_tray(tray);
+        let _ = DestroyWindow(tray);
         let _ = UnhookWinEvent(winhook);
         let _ = UnhookWindowsHookEx(hook);
         let _ = WTSUnRegisterSessionNotification(hwnd);
