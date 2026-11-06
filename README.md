@@ -32,10 +32,10 @@ Defaults; every one can be rebound (see [Config](#config)). Keys are physical US
 | I / J / K / L | Move up / left / down / right (combine for diagonals) |
 | Space + move / scroll | Slow (20% movement, 25% scroll) |
 | Shift + move / scroll | Fast (3×) |
-| ; | Left click |
-| N | Right click |
-| , | Middle click |
-| M | Toggle left-button hold (drag) |
+| ; | Left button (hold to drag) |
+| N | Right button |
+| , | Middle button |
+| M | Drag lock: left button stays down until M or ; (M while holding ; locks it) |
 | U / O | Scroll up / down |
 | H / Y | Scroll left / right |
 | Ctrl + U / O | One wheel notch per press (Ctrl + wheel zoom) |
@@ -47,7 +47,7 @@ Defaults; every one can be rebound (see [Config](#config)). Keys are physical US
 | G | Grid mode |
 | F | Hint mode |
 
-Holding a scroll key scrolls smoothly; a short tap scrolls in proportion to how long it was held. Unbound keys type normally. The speed level is remembered between runs.
+The click keys work like mouse buttons: the button is down for as long as the key is. Holding a scroll key scrolls smoothly; a short tap scrolls in proportion to how long it was held. Unbound keys type normally. The speed level is remembered between runs.
 
 ### Grid mode
 

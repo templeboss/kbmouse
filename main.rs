@@ -1076,6 +1076,7 @@ fn set_mode(on: bool) {
     }
     RESET.store(true, Relaxed);
     if !on {
+        release_buttons();
         release_drag();
         close_grid();
         close_hint();
@@ -1103,7 +1104,52 @@ fn release_all() {
     set_mode(false);
 }
 
+/// Mouse buttons held down by the click keys: left, right, middle.
+static BUTTON_HELD: [AtomicBool; 3] = [const { AtomicBool::new(false) }; 3];
+const BUTTON_FLAGS: [(MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS); 3] = [
+    (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+    (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+    (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+];
+
+fn button_of(a: Action) -> Option<usize> {
+    match a {
+        ClickLeft => Some(0),
+        ClickRight => Some(1),
+        ClickMiddle => Some(2),
+        _ => None,
+    }
+}
+
+/// Click key pressed: its button goes down until the key is released, like a
+/// real mouse button. With the drag lock on, left drops the drag instead.
+fn button_down(i: usize) {
+    if i == 0 && DRAGGING.load(Relaxed) {
+        return toggle_drag();
+    }
+    if !BUTTON_HELD[i].swap(true, Relaxed) {
+        send(&[mouse_input(BUTTON_FLAGS[i].0, 0, 0, 0)]);
+    }
+}
+
+fn button_up(i: usize) {
+    if BUTTON_HELD[i].swap(false, Relaxed) {
+        send(&[mouse_input(BUTTON_FLAGS[i].1, 0, 0, 0)]);
+    }
+}
+
+fn release_buttons() {
+    for i in 0..3 {
+        button_up(i);
+    }
+}
+
 fn toggle_drag() {
+    // Left already held by its click key: lock it instead of pressing again.
+    if !DRAGGING.load(Relaxed) && BUTTON_HELD[0].swap(false, Relaxed) {
+        DRAGGING.store(true, Relaxed);
+        return post(WM_REFRESH);
+    }
     let on = !DRAGGING.load(Relaxed);
     DRAGGING.store(on, Relaxed);
     send(&[mouse_input(if on { MOUSEEVENTF_LEFTDOWN } else { MOUSEEVENTF_LEFTUP }, 0, 0, 0)]);
@@ -1134,6 +1180,8 @@ fn reload_config() {
         post(WM_SAVE_SOON);
     }
     set_cfg(new);
+    // Bindings may move; a held click key's release would no longer match.
+    release_buttons();
     close_grid();
     close_hint();
     for s in &SCROLL {
@@ -1234,7 +1282,12 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
             Some(ScrollDown) => SCROLL[1].store(false, Relaxed),
             Some(ScrollLeft) => SCROLL[2].store(false, Relaxed),
             Some(ScrollRight) => SCROLL[3].store(false, Relaxed),
-            _ => {}
+            Some(a) => {
+                if let Some(i) = button_of(a) {
+                    button_up(i);
+                }
+            }
+            None => {}
         }
     }
 
@@ -1293,17 +1346,9 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
                 (0x0D | 0x1B, _) => close_grid(),
                 (_, Some(Grid)) => open_grid(), // restart: full grid on the cursor's monitor
                 (0x08, _) => grid_back(),
-                (_, Some(ClickLeft)) => {
+                (_, Some(a @ (ClickLeft | ClickRight | ClickMiddle))) => {
                     close_grid();
-                    click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
-                }
-                (_, Some(ClickRight)) => {
-                    close_grid();
-                    click(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
-                }
-                (_, Some(ClickMiddle)) => {
-                    close_grid();
-                    click(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP);
+                    button_down(button_of(a).unwrap());
                 }
                 _ => {
                     if k.flags.0 & 1 == 0 {
@@ -1341,9 +1386,11 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     match act {
         // Movement is driven by the worker from HELD_SC; Slow is a modifier.
         Up | Down | Left | Right | Slow => {}
-        ClickRight => click(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-        ClickMiddle => click(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-        ClickLeft => click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        ClickLeft | ClickRight | ClickMiddle => {
+            if !repeat {
+                button_down(button_of(act).unwrap());
+            }
+        }
         Drag => {
             if !repeat {
                 toggle_drag();
@@ -1977,6 +2024,7 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
+        release_buttons();
         release_drag();
         close_grid();
         close_hint();
