@@ -36,7 +36,7 @@ Space slows movement only while held. Keys 1–4 jump once per press on whicheve
 
 ## Rust version: grid mode
 
-**G** opens a 4×3 grid over the cursor's monitor, labelled like the keys (`Q W E R / A S D F / Z X C V`; `grid_rows = 4` adds `1 2 3 4` on top). Each key narrows to that cell and moves the cursor to its center; after the 4th press the grid closes on its own. **Backspace** steps back; **Enter / Esc** close it, **G** restarts with the full grid (Caps closes it and leaves mouse mode); a **click key** (`;` `N` `,`) closes it and clicks. Any other key closes it (swallowed, like G).
+**G** opens a 3×3 grid over the cursor's monitor, labelled like the keys (`Q W E / A S D / Z X C`; `grid_rows = 4` adds `1 2 3` on top). Each key narrows to that cell and moves the cursor to its center; **Shift** + key also left-clicks there and closes the grid. After the 4th press the grid closes on its own. **Backspace** steps back; **Enter / Esc** close it, **G** restarts with the full grid (Caps closes it and leaves mouse mode); a **click key** (`;` `N` `,`) closes it and clicks. Any other key closes it (swallowed, like G).
 
 ## Rust version: config and state
 

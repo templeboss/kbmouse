@@ -137,7 +137,7 @@ fn default_config_text() -> String {
     t += "shift_boost = 3.0     # Shift multiplies movement and scroll\n";
     t += "slow_move = 0.20      # slow key multiplier for movement\n";
     t += "slow_scroll = 0.25    # slow key multiplier for scrolling\n\n";
-    t += "# Grid mode: 4 columns; 3 rows = Q-V keys, 4 rows adds 1-4 on top.\ngrid_rows = 3\n\n";
+    t += "# Grid mode: 3 columns; 3 rows = QWE/ASD/ZXC, 4 rows adds 123 on top.\ngrid_rows = 3\n\n";
     t += "# Corner jump positions as x, y fractions of the work area (0 = left/top, 1 = right/bottom).\n";
     for (i, j) in DEFAULT_JUMPS.iter().enumerate() {
         t += &format!("jump{} = {j}\n", i + 1);
@@ -373,6 +373,16 @@ fn click(down: MOUSE_EVENT_FLAGS, up: MOUSE_EVENT_FLAGS) {
     send(&[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)]);
 }
 
+/// Click without Shift: if Shift is held, lift it around the click so apps see
+/// a plain click, then press it again.
+fn click_unshifted(down: MOUSE_EVENT_FLAGS, up: MOUSE_EVENT_FLAGS) {
+    if !shift_phys() {
+        return click(down, up);
+    }
+    let sc = |up: bool| key_input(0, 0x2A, KEYEVENTF_SCANCODE | if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) });
+    send(&[sc(true), mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0), sc(false)]);
+}
+
 fn tap_vk(vk: u16) {
     send(&[key_input(vk, 0, KEYBD_EVENT_FLAGS(0)), key_input(vk, 0, KEYEVENTF_KEYUP)]);
 }
@@ -466,19 +476,20 @@ fn jump_next_monitor() {
 
 // ---- grid mode ----
 // A key opens a grid over the cursor's monitor. Each key press narrows to that
-// cell and moves the cursor to its center. Enter/Esc/Caps close it; a click
-// key closes it and clicks; Backspace steps back.
-const GRID_COLS: i32 = 4;
+// cell and moves the cursor to its center; with Shift it also left-clicks there
+// and closes. Enter/Esc/Caps close it; a click key closes it and clicks;
+// Backspace steps back.
+const GRID_COLS: i32 = 3;
 /// Key presses after which the grid closes on its own.
 const GRID_DEPTH: usize = 4;
-/// Scan codes per grid row: 1234 / QWER / ASDF / ZXCV. `grid_rows` 3 uses the last three.
-const GRID_KEYS: [[usize; 4]; 4] = [
-    [0x02, 0x03, 0x04, 0x05],
-    [0x10, 0x11, 0x12, 0x13],
-    [0x1E, 0x1F, 0x20, 0x21],
-    [0x2C, 0x2D, 0x2E, 0x2F],
+/// Scan codes per grid row: 123 / QWE / ASD / ZXC. `grid_rows` 3 uses the last three.
+const GRID_KEYS: [[usize; 3]; 4] = [
+    [0x02, 0x03, 0x04],
+    [0x10, 0x11, 0x12],
+    [0x1E, 0x1F, 0x20],
+    [0x2C, 0x2D, 0x2E],
 ];
-const GRID_LABELS: [&[u8; 4]; 4] = [b"1234", b"QWER", b"ASDF", b"ZXCV"];
+const GRID_LABELS: [&[u8; 3]; 4] = [b"123", b"QWE", b"ASD", b"ZXC"];
 static GRID: AtomicBool = AtomicBool::new(false);
 static GRID_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Regions [left, top, right, bottom] in screen pixels; first = the monitor.
@@ -506,7 +517,8 @@ fn grid_land(r: [i32; 4]) {
     move_to((r[0] + r[2] - 1) / 2, (r[1] + r[3] - 1) / 2);
 }
 
-fn grid_press(sc: usize) {
+/// `click`: land on the cell, then left-click there and close the grid.
+fn grid_press(sc: usize, click: bool) {
     let rows = cfg().grid_rows;
     let off = 4 - rows;
     let Some((row, col)) =
@@ -521,7 +533,12 @@ fn grid_press(sc: usize) {
     };
     let (w, h) = (cur[2] - cur[0], cur[3] - cur[1]);
     if w < GRID_COLS * 2 || h < rows as i32 * 2 {
-        return; // already pixel-sized
+        drop(st);
+        if click {
+            close_grid(); // already pixel-sized: click where the cursor is
+            click_unshifted(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+        }
+        return;
     }
     let cell = |i: i32, n: i32, len: i32| (len as f64 * i as f64 / n as f64).round() as i32;
     let n = rows as i32;
@@ -535,7 +552,10 @@ fn grid_press(sc: usize) {
     let done = st.len() > GRID_DEPTH; // root + GRID_DEPTH presses
     drop(st);
     grid_land(next);
-    if done {
+    if click {
+        close_grid();
+        click_unshifted(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+    } else if done {
         close_grid();
     } else {
         post(WM_GRID);
@@ -851,7 +871,7 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
                 }
                 _ => {
                     if k.flags.0 & 1 == 0 {
-                        grid_press(sc);
+                        grid_press(sc, shift_phys());
                     } else {
                         close_grid();
                     }
