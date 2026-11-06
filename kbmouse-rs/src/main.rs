@@ -459,11 +459,11 @@ fn cursor_monitor() -> HMONITOR {
     unsafe { MonitorFromPoint(cursor(), MONITOR_DEFAULTTOPRIMARY) }
 }
 
-unsafe extern "system" fn collect_monitor(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+unsafe extern "system" fn collect_monitor(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL { unsafe {
     let v = &mut *(data.0 as *mut Vec<HMONITOR>);
     v.push(m);
     BOOL(1)
-}
+}}
 
 /// All monitors, primary first.
 fn monitors() -> Vec<HMONITOR> {
@@ -695,7 +695,7 @@ fn paint_grid(hwnd: HWND) {
     }
 }
 
-unsafe extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT { unsafe {
     match msg {
         WM_PAINT => {
             paint_grid(hwnd);
@@ -704,7 +704,7 @@ unsafe extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         WM_ERASEBKGND => LRESULT(1),
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
-}
+}}
 
 fn create_grid() {
     unsafe {
@@ -815,11 +815,12 @@ fn enumerate_hints(fg: isize) -> Vec<Hint> {
             let mut v = Vec::new();
             for i in 0..all.Length()? {
                 let Ok(e) = all.GetElement(i) else { continue };
-                if let Ok(r) = e.CachedBoundingRectangle() {
-                    if r.right > r.left && r.bottom > r.top {
-                        let name = e.CachedName().map(|n| n.to_string()).unwrap_or_default();
-                        v.push(([r.left, r.top, r.right, r.bottom], name));
-                    }
+                if let Ok(r) = e.CachedBoundingRectangle()
+                    && r.right > r.left
+                    && r.bottom > r.top
+                {
+                    let name = e.CachedName().map(|n| n.to_string()).unwrap_or_default();
+                    v.push(([r.left, r.top, r.right, r.bottom], name));
                 }
             }
             Ok(v)
@@ -903,14 +904,14 @@ fn open_hint() {
     } else {
         unsafe { GetForegroundWindow() }.0 as isize
     };
-    let gen = HINT_GEN.fetch_add(1, Relaxed) + 1;
+    let hint_gen = HINT_GEN.fetch_add(1, Relaxed) + 1;
     HINTS.lock().unwrap().clear();
     HINT_TYPED.lock().unwrap().clear();
     HINT.store(true, Relaxed);
     // UI Automation can be slow; keep it off the hook thread.
     std::thread::spawn(move || {
         let list = enumerate_hints(fg);
-        if HINT.load(Relaxed) && HINT_GEN.load(Relaxed) == gen {
+        if HINT.load(Relaxed) && HINT_GEN.load(Relaxed) == hint_gen {
             *HINTS.lock().unwrap() = list;
             post(WM_HINT);
         }
@@ -1018,7 +1019,7 @@ fn paint_hint(hwnd: HWND) {
     }
 }
 
-unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT { unsafe {
     match msg {
         WM_PAINT => {
             paint_hint(hwnd);
@@ -1027,7 +1028,7 @@ unsafe extern "system" fn hint_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         WM_ERASEBKGND => LRESULT(1),
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
-}
+}}
 
 fn create_hint() {
     unsafe {
@@ -1140,7 +1141,7 @@ unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, _:
 }
 
 // ---- keyboard hook ----
-unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT { unsafe {
     if code >= 0 {
         let k = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         // Skip events we (or other tools) injected.
@@ -1157,7 +1158,7 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
         }
     }
     CallNextHookEx(None, code, wparam, lparam)
-}
+}}
 
 /// Returns true to swallow the key.
 fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
@@ -1201,7 +1202,7 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
 
     // Right Shift acts as Left Shift.
     if vk == RSHIFT {
-        if !(SCROLLING.load(Relaxed) && !up) {
+        if !SCROLLING.load(Relaxed) || up {
             lshift(up);
         } else {
             SHIFT_HIDDEN.store(true, Relaxed);
@@ -1429,8 +1430,8 @@ impl Worker {
             let vel = c.speeds[SPEED_LEVEL.load(Relaxed) - 1] * if space { c.slow_move } else { 1.0 } * boost;
             let (mut ax, mut ay) = (dx as f64, dy as f64);
             if dx != 0 && dy != 0 {
-                ax *= 0.70710678;
-                ay *= 0.70710678;
+                ax *= std::f64::consts::FRAC_1_SQRT_2;
+                ay *= std::f64::consts::FRAC_1_SQRT_2;
             }
             self.fx += ax * vel * dt;
             self.fy += ay * vel * dt;
@@ -1580,7 +1581,7 @@ fn refresh_visibility(hwnd: HWND) {
     let p = cursor();
     let [x, y, w, h] = [0, 1, 2, 3].map(|i| BADGE_RECT[i].load(Relaxed));
     let over = p.x >= x && p.x < x + w && p.y >= y && p.y < y + h;
-    if (!over) != BADGE_VISIBLE.load(Relaxed) {
+    if over == BADGE_VISIBLE.load(Relaxed) {
         unsafe {
             let _ = ShowWindow(hwnd, if over { SW_HIDE } else { SW_SHOWNOACTIVATE });
         }
@@ -1629,7 +1630,7 @@ fn paint(hwnd: HWND) {
     }
 }
 
-unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT { unsafe {
     match msg {
         WM_PAINT => {
             paint(hwnd);
@@ -1684,7 +1685,7 @@ unsafe extern "system" fn badge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
-}
+}}
 
 fn create_badge() -> HWND {
     unsafe {
