@@ -88,3 +88,7 @@ Labels follow names where they can: **Q** close, **W** maximize/restore, **E** m
 While a `disabled_apps` program is focused, every key passes through, Caps Lock works normally and mouse mode turns off.
 
 Caps Lock, Shift, Ctrl and Ctrl + Alt + Q cannot be rebound.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md). Free for personal and other noncommercial use; any commercial use, including selling it or bundling it into a paid product, is not allowed. Copies and modified versions must keep the `Required Notice` line crediting Tymon Maciejak.
