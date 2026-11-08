@@ -16,7 +16,7 @@ cargo build --release   # target\release\kbmouse.exe
 | Key | Action |
 | --- | --- |
 | Caps Lock | Toggle mouse mode (releases drag) |
-| Shift + Caps Lock | Toggle the real Caps Lock |
+| Ctrl + Shift + Caps Lock | Toggle the real Caps Lock |
 | Ctrl + Alt + Q | Quit |
 
 A badge in the bottom-left of the cursor's monitor shows the speed level while mouse mode is on. It turns amber while dragging and hides when the cursor is over it.
@@ -25,29 +25,30 @@ Click the tray icon for **Edit settings**, **Open settings folder**, **Reload se
 
 ## Mouse mode keys
 
-Defaults; every one can be rebound (see [Config](#config)). Keys are physical US-layout positions.
+Defaults; every one can be rebound (see [Config](#config)). Keys are physical US-layout positions. With Ctrl held, every key except the scroll keys goes to the app, so Ctrl shortcuts (Ctrl + N, Ctrl + V, ...) work in mouse mode.
 
 | Key | Action |
 | --- | --- |
 | I / J / K / L | Move up / left / down / right (combine for diagonals) |
-| Space + move / scroll | Slow (20% movement, 25% scroll) |
+| Space + move / scroll | Slow (14% movement, 25% scroll) |
 | Shift + move / scroll | Fast (3×) |
-| ; | Left button (hold to drag) |
+| ; | Left click (instant) |
+| R | Left button (hold to drag) |
 | N | Right button |
 | , | Middle button |
-| M | Drag lock: left button stays down until M or ; (M while holding ; locks it) |
+| M | Drag lock: left button stays down until M, ; or R (M while holding R locks it) |
 | U / O | Scroll up / down |
 | H / Y | Scroll left / right |
 | Ctrl + U / O | One wheel notch per press (Ctrl + wheel zoom) |
 | P / . | Speed level up / down |
-| V / B | Browser back / forward (Ctrl + V / B pass through) |
+| V / B | Browser back / forward |
 | 7 / 9 | Home / End |
 | 1 / 2 / 3 / 4 | Jump to top-left / top-right / bottom-left / bottom-right of the current monitor |
 | ` | Jump to the center of the next monitor |
 | G | Grid mode |
 | F | Hint mode |
 
-The click keys work like mouse buttons: the button is down for as long as the key is. Holding a scroll key scrolls smoothly; a short tap scrolls in proportion to how long it was held. Unbound keys type normally. The speed level is remembered between runs.
+R, N and , work like mouse buttons: the button is down for as long as the key is. ; clicks once on press. Holding a scroll key scrolls smoothly; a short tap scrolls in proportion to how long it was held. Unbound keys type normally. The speed level is remembered between runs.
 
 ### Grid mode
 
@@ -75,10 +76,10 @@ Labels follow names where they can: **Q** close, **W** maximize/restore, **E** m
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `speeds` | `1800, 2400, 3000, 4000, 5200` | Speed levels in px/s (1–9 values) |
+| `speeds` | `3500` | Speed levels in px/s (1–9 values; add more to use P / .) |
 | `scroll_speed` | `1200` | Wheel units/s (120 = one notch) |
 | `shift_boost` | `3.0` | Shift multiplier |
-| `slow_move` / `slow_scroll` | `0.20` / `0.25` | Space multipliers |
+| `slow_move` / `slow_scroll` | `0.14` / `0.25` | Space multipliers |
 | `grid_rows` | `3` | Grid rows, 3 or 4 |
 | `disabled_apps` | `League of Legends.exe` | Exe names where kbmouse is fully off |
 | `jump1`–`jump4` | 10% in from each corner | Corner jump targets as `x, y` fractions of the work area |

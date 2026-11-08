@@ -46,15 +46,15 @@ enum Action {
     ClickLeft, ClickRight, ClickMiddle, Drag,
     ScrollUp, ScrollDown, ScrollLeft, ScrollRight,
     SpeedUp, SpeedDown, Back, Forward, Home, End,
-    Corner1, Corner2, Corner3, Corner4, NextMonitor, Grid, Hint,
+    Corner1, Corner2, Corner3, Corner4, NextMonitor, Grid, Hint, HoldLeft,
 }
 use Action::*;
 
 /// (config name, action, default key). Keys are physical positions (US layout).
-const BINDINGS: [(&str, Action, &str); 26] = [
+const BINDINGS: [(&str, Action, &str); 27] = [
     ("up", Up, "I"), ("down", Down, "K"), ("left", Left, "J"), ("right", Right, "L"),
     ("slow", Slow, "space"),
-    ("click_left", ClickLeft, "semicolon"), ("click_right", ClickRight, "N"),
+    ("click_left", ClickLeft, "semicolon"), ("hold_left", HoldLeft, "R"), ("click_right", ClickRight, "N"),
     ("click_middle", ClickMiddle, "comma"), ("drag", Drag, "M"),
     ("scroll_up", ScrollUp, "U"), ("scroll_down", ScrollDown, "O"),
     ("scroll_left", ScrollLeft, "H"), ("scroll_right", ScrollRight, "Y"),
@@ -66,7 +66,7 @@ const BINDINGS: [(&str, Action, &str); 26] = [
     ("next_monitor", NextMonitor, "backtick"), ("grid", Grid, "G"), ("hint", Hint, "F"),
 ];
 
-const DEFAULT_SPEEDS: &str = "1800, 2400, 3000, 4000, 5200";
+const DEFAULT_SPEEDS: &str = "3500";
 const DEFAULT_DISABLED: &str = "League of Legends.exe";
 const DEFAULT_JUMPS: [&str; 4] = ["0.10, 0.10", "0.90, 0.10", "0.10, 0.90", "0.90, 0.90"];
 
@@ -147,7 +147,7 @@ fn default_config_text() -> String {
     t += &format!("speeds = {DEFAULT_SPEEDS}\n");
     t += "scroll_speed = 1200   # wheel units/s, 120 = one notch\n";
     t += "shift_boost = 3.0     # Shift multiplies movement and scroll\n";
-    t += "slow_move = 0.20      # slow key multiplier for movement\n";
+    t += "slow_move = 0.14      # slow key multiplier for movement\n";
     t += "slow_scroll = 0.25    # slow key multiplier for scrolling\n\n";
     t += "# Grid mode: 3 columns; 3 rows = QWE/ASD/ZXC, 4 rows adds 123 on top.\ngrid_rows = 3\n\n";
     t += "# Apps where kbmouse is fully off (comma-separated exe names, e.g. games).
@@ -227,7 +227,7 @@ fn load_config(warns: &mut Vec<String>) -> Config {
     };
     let scroll_speed = num("scroll_speed", 1200.0, warns);
     let shift_boost = num("shift_boost", 3.0, warns);
-    let slow_move = num("slow_move", 0.20, warns);
+    let slow_move = num("slow_move", 0.14, warns);
     let slow_scroll = num("slow_scroll", 0.25, warns);
 
     let mut grid_rows = 3;
@@ -907,34 +907,63 @@ fn enumerate_hints(fg: isize) -> Vec<Hint> {
     }
 }
 
+/// A window F can label: on screen and not the Alt+Tab / Task View switcher.
+fn hint_target(h: HWND) -> bool {
+    unsafe {
+        if h.0.is_null() || !IsWindow(Some(h)).as_bool() || !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+            return false;
+        }
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(h, &mut buf).max(0) as usize;
+        !matches!(
+            String::from_utf16_lossy(&buf[..n]).as_str(),
+            "ForegroundStaging" | "XamlExplorerHostIslandWindow" | "MultitaskingViewFrame"
+        )
+    }
+}
+
 fn open_hint() {
     close_grid();
-    // Prefer the window the foreground event reported: right after Alt+Tab,
-    // GetForegroundWindow can still return the window just left.
-    let ev = FG_EVENT.load(Relaxed);
-    let fg = if ev != 0 && unsafe { IsWindow(Some(HWND(ev as *mut _))) }.as_bool() {
-        ev
-    } else {
-        unsafe { GetForegroundWindow() }.0 as isize
+    // The foreground window decides. The last foreground event is only a fallback
+    // while the foreground is a transient switcher window or not on screen: the
+    // event can be skipped, so on its own it may name a window focus has left.
+    let gfw = unsafe { GetForegroundWindow() };
+    let ev = HWND(FG_EVENT.load(Relaxed) as *mut _);
+    let fg = if hint_target(gfw) || !hint_target(ev) { gfw } else { ev }.0 as isize;
+    // HINT, HINT_GEN and HINTS change together under the HINTS lock, so a
+    // finished scan can't race a close or a newer open.
+    let hint_gen = {
+        let mut hints = HINTS.lock().unwrap();
+        hints.clear();
+        HINT_TYPED.lock().unwrap().clear();
+        HINT.store(true, Relaxed);
+        HINT_GEN.fetch_add(1, Relaxed) + 1
     };
-    let hint_gen = HINT_GEN.fetch_add(1, Relaxed) + 1;
-    HINTS.lock().unwrap().clear();
-    HINT_TYPED.lock().unwrap().clear();
-    HINT.store(true, Relaxed);
     // UI Automation can be slow; keep it off the hook thread.
     std::thread::spawn(move || {
         let list = enumerate_hints(fg);
-        if HINT.load(Relaxed) && HINT_GEN.load(Relaxed) == hint_gen {
-            *HINTS.lock().unwrap() = list;
-            post(WM_HINT);
+        let mut hints = HINTS.lock().unwrap();
+        if !HINT.load(Relaxed) || HINT_GEN.load(Relaxed) != hint_gen {
+            return;
         }
+        if list.is_empty() {
+            // Nothing to pick: leave hint mode so keys aren't swallowed.
+            HINT.store(false, Relaxed);
+            HINT_GEN.fetch_add(1, Relaxed);
+        } else {
+            *hints = list;
+        }
+        drop(hints);
+        post(WM_HINT);
     });
 }
 
 fn close_hint() {
+    let mut hints = HINTS.lock().unwrap();
     if HINT.swap(false, Relaxed) {
         HINT_GEN.fetch_add(1, Relaxed);
-        HINTS.lock().unwrap().clear();
+        hints.clear();
+        drop(hints);
         post(WM_HINT);
     }
 }
@@ -1112,9 +1141,10 @@ const BUTTON_FLAGS: [(MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS); 3] = [
     (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
 ];
 
+/// Button a held click key presses. ClickLeft is an instant click (left_tap).
 fn button_of(a: Action) -> Option<usize> {
     match a {
-        ClickLeft => Some(0),
+        HoldLeft => Some(0),
         ClickRight => Some(1),
         ClickMiddle => Some(2),
         _ => None,
@@ -1129,6 +1159,16 @@ fn button_down(i: usize) {
     }
     if !BUTTON_HELD[i].swap(true, Relaxed) {
         send(&[mouse_input(BUTTON_FLAGS[i].0, 0, 0, 0)]);
+    }
+}
+
+/// Instant left click on key press. With the drag lock on, drops the drag instead.
+fn left_tap() {
+    if DRAGGING.load(Relaxed) {
+        return toggle_drag();
+    }
+    if !BUTTON_HELD[0].load(Relaxed) {
+        click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
     }
 }
 
@@ -1190,6 +1230,7 @@ fn reload_config() {
     RESET.store(true, Relaxed);
     wake();
     post(WM_REFRESH);
+    DISABLED_FOR.store(0, Relaxed); // disabled_apps may have changed
     check_foreground();
     if !warns.is_empty() {
         warn_box(&warns.join("\n"));
@@ -1211,8 +1252,18 @@ fn exe_name(hwnd: HWND) -> Option<String> {
     }
 }
 
+/// Foreground window DISABLED was last worked out for (0 forces a re-check).
+static DISABLED_FOR: AtomicIsize = AtomicIsize::new(0);
+
+/// Updates DISABLED from the current foreground window. Cheap when that window
+/// hasn't changed, so the key hook calls it on every key: the foreground event
+/// alone can be skipped (e.g. Alt+Tab out of a fullscreen game), leaving it stale.
 fn check_foreground() {
-    let hit = exe_name(unsafe { GetForegroundWindow() }).is_some_and(|n| cfg().disabled_apps.contains(&n));
+    let fg = unsafe { GetForegroundWindow() };
+    if DISABLED_FOR.swap(fg.0 as isize, Relaxed) == fg.0 as isize && !fg.0.is_null() {
+        return;
+    }
+    let hit = exe_name(fg).is_some_and(|n| cfg().disabled_apps.contains(&n));
     if DISABLED.swap(hit, Relaxed) != hit && hit {
         set_mode(false); // also releases drag and closes the grid
     }
@@ -1306,14 +1357,15 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     }
 
     // Disabled app focused: everything passes through, including Caps Lock.
+    check_foreground();
     if DISABLED.load(Relaxed) {
         return up && SWALLOWED[vk].swap(false, Relaxed);
     }
 
-    // Caps Lock: toggle mouse mode. Shift+Caps toggles the real Caps Lock.
+    // Caps Lock: toggle mouse mode. Ctrl+Shift+Caps toggles the real Caps Lock.
     if vk == CAPS {
         if !up && !repeat {
-            if shift_phys() {
+            if ctrl_phys() && shift_phys() {
                 tap_vk(VK_CAPITAL.0);
             } else {
                 toggle_mode();
@@ -1346,7 +1398,11 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
                 (0x0D | 0x1B, _) => close_grid(),
                 (_, Some(Grid)) => open_grid(), // restart: full grid on the cursor's monitor
                 (0x08, _) => grid_back(),
-                (_, Some(a @ (ClickLeft | ClickRight | ClickMiddle))) => {
+                (_, Some(ClickLeft)) => {
+                    close_grid();
+                    left_tap();
+                }
+                (_, Some(a @ (HoldLeft | ClickRight | ClickMiddle))) => {
                     close_grid();
                     button_down(button_of(a).unwrap());
                 }
@@ -1383,10 +1439,22 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         return false;
     };
 
+    // Ctrl+key goes to the app (Ctrl+N, Ctrl+V, ...), except the Ctrl+scroll notches.
+    // A key already held by the layer stays with it until released.
+    if ctrl_phys() && !matches!(act, ScrollUp | ScrollDown | ScrollLeft | ScrollRight) && !SWALLOWED[vk].load(Relaxed) {
+        HELD_SC[sc].store(false, Relaxed);
+        return false;
+    }
+
     match act {
         // Movement is driven by the worker from HELD_SC; Slow is a modifier.
         Up | Down | Left | Right | Slow => {}
-        ClickLeft | ClickRight | ClickMiddle => {
+        ClickLeft => {
+            if !repeat {
+                left_tap();
+            }
+        }
+        HoldLeft | ClickRight | ClickMiddle => {
             if !repeat {
                 button_down(button_of(act).unwrap());
             }
@@ -1399,14 +1467,10 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         ScrollUp | ScrollDown | ScrollLeft | ScrollRight => scroll_key(act),
         SpeedUp => change_speed(1),
         SpeedDown => change_speed(-1),
-        // Back/Forward, except with Ctrl so Ctrl+V / Ctrl+B pass through.
         Back | Forward => {
-            if ctrl_phys() {
-                return false;
-            }
             tap_vk(if act == Forward { VK_BROWSER_FORWARD.0 } else { VK_BROWSER_BACK.0 });
         }
-        // Home / End auto-repeat; Shift and Ctrl still apply.
+        // Home / End auto-repeat; Shift still applies.
         Home => tap_ext(VK_HOME.0),
         End => tap_ext(VK_END.0),
         Corner1 | Corner2 | Corner3 | Corner4 => {
