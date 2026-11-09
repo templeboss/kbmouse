@@ -18,6 +18,7 @@ cargo build --release   # target\release\kbmouse.exe
 | Caps Lock | Toggle mouse mode (releases drag) |
 | Ctrl + Shift + Caps Lock | Toggle the real Caps Lock |
 | Ctrl + Alt + Q | Quit |
+| Win + any key | Goes to Windows (Win + R, Win + E, ...) and turns mouse mode off |
 
 A badge in the bottom-left of the cursor's monitor shows the speed level while mouse mode is on. It turns amber while dragging and hides when the cursor is over it.
 

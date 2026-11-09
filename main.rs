@@ -36,6 +36,8 @@ const LCTRL: usize = 0xA2;
 const RCTRL: usize = 0xA3;
 const LALT: usize = 0xA4;
 const RALT: usize = 0xA5;
+const LWIN: usize = 0x5B;
+const RWIN: usize = 0x5C;
 const CAPS: usize = 0x14;
 const KEY_Q: usize = 0x51;
 
@@ -367,6 +369,9 @@ fn ctrl_phys() -> bool {
 }
 fn alt_phys() -> bool {
     held(LALT) || held(RALT)
+}
+fn win_phys() -> bool {
+    held(LWIN) || held(RWIN)
 }
 
 /// Wakes the worker; it parks whenever nothing is moving or scrolling.
@@ -1385,6 +1390,16 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         return SWALLOWED[vk].swap(false, Relaxed);
     }
     if !MODE.load(Relaxed) {
+        return false;
+    }
+
+    // Win+key goes to Windows (Win+R, Win+E, ...) and turns mouse mode off, so
+    // whatever it opens is ready for typing. A key already held by the layer stays with it.
+    if win_phys() && !matches!(vk, 0xA0..=0xA5 | 0x10..=0x12 | 0x5B | 0x5C) && !SWALLOWED[vk].load(Relaxed) {
+        if k.flags.0 & 1 == 0 && sc < 256 {
+            HELD_SC[sc].store(false, Relaxed);
+        }
+        set_mode(false);
         return false;
     }
 
