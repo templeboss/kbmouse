@@ -1440,8 +1440,9 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
     };
 
     // Ctrl+key goes to the app (Ctrl+N, Ctrl+H, ...), except Ctrl+scroll up/down
-    // (one wheel notch, for zoom). A key already held by the layer stays with it until released.
-    if ctrl_phys() && !matches!(act, ScrollUp | ScrollDown) && !SWALLOWED[vk].load(Relaxed) {
+    // (one wheel notch, for zoom) and Ctrl+click (ClickLeft), which opens links in a new tab.
+    // A key already held by the layer stays with it until released.
+    if ctrl_phys() && !matches!(act, ScrollUp | ScrollDown | ClickLeft) && !SWALLOWED[vk].load(Relaxed) {
         HELD_SC[sc].store(false, Relaxed);
         return false;
     }
