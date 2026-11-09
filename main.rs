@@ -1439,9 +1439,9 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
         return false;
     };
 
-    // Ctrl+key goes to the app (Ctrl+N, Ctrl+V, ...), except the Ctrl+scroll notches.
-    // A key already held by the layer stays with it until released.
-    if ctrl_phys() && !matches!(act, ScrollUp | ScrollDown | ScrollLeft | ScrollRight) && !SWALLOWED[vk].load(Relaxed) {
+    // Ctrl+key goes to the app (Ctrl+N, Ctrl+H, ...), except Ctrl+scroll up/down
+    // (one wheel notch, for zoom). A key already held by the layer stays with it until released.
+    if ctrl_phys() && !matches!(act, ScrollUp | ScrollDown) && !SWALLOWED[vk].load(Relaxed) {
         HELD_SC[sc].store(false, Relaxed);
         return false;
     }
@@ -1499,14 +1499,9 @@ fn handle_key(k: &KBDLLHOOKSTRUCT) -> bool {
 }
 
 fn scroll_key(act: Action) {
-    if ctrl_phys() {
+    if ctrl_phys() && matches!(act, ScrollUp | ScrollDown) {
         // One whole notch per press so Ctrl+wheel zooms in steps.
-        match act {
-            ScrollUp => wheel(false, 120),
-            ScrollDown => wheel(false, -120),
-            ScrollRight => wheel(true, 120),
-            _ => wheel(true, -120),
-        }
+        wheel(false, if act == ScrollUp { 120 } else { -120 });
         return;
     }
     let i = match act {

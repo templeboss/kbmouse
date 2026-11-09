@@ -25,7 +25,7 @@ Click the tray icon for **Edit settings**, **Open settings folder**, **Reload se
 
 ## Mouse mode keys
 
-Defaults; every one can be rebound (see [Config](#config)). Keys are physical US-layout positions. With Ctrl held, every key except the scroll keys goes to the app, so Ctrl shortcuts (Ctrl + N, Ctrl + V, ...) work in mouse mode.
+Defaults; every one can be rebound (see [Config](#config)). Keys are physical US-layout positions. With Ctrl held, every key except U / O (zoom) goes to the app, so Ctrl shortcuts (Ctrl + N, Ctrl + V, ...) work in mouse mode.
 
 | Key | Action |
 | --- | --- |
